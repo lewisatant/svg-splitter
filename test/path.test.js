@@ -388,7 +388,11 @@ test('leading and trailing commas are separators', () => {
 
 test('bounds of a straight line is the anchor bbox', () => {
   const b = S.path.bounds(S.path.parse('M0 0 L10 5').contours);
-  assert.deepStrictEqual(b, { minX: 0, minY: 0, maxX: 10, maxY: 5 });
+  // note: vm-sandbox objects have foreign prototypes, so compare fields
+  assert.strictEqual(b.minX, 0);
+  assert.strictEqual(b.minY, 0);
+  assert.strictEqual(b.maxX, 10);
+  assert.strictEqual(b.maxY, 5);
 });
 
 test('bounds includes cubic extremum beyond the anchors (maxY 37.5)', () => {
@@ -433,17 +437,19 @@ test("garbage leading command 'X 5 5' throws a parse error", () => {
 });
 
 test('empty string yields { contours: [] }', () => {
-  assert.deepStrictEqual(S.path.parse(''), { contours: [] });
-  assert.deepStrictEqual(S.path.parse('   '), { contours: [] });
+  for (const input of ['', '   ']) {
+    const r = S.path.parse(input);
+    assert.ok(Array.isArray(r.contours), 'contours is an array');
+    assert.strictEqual(r.contours.length, 0);
+  }
 });
 
 test('a lone M produces no contour (single-point open contours are dropped)', () => {
-  assert.deepStrictEqual(S.path.parse('M5 5').contours, []);
+  assert.strictEqual(S.path.parse('M5 5').contours.length, 0);
 });
 
 test(
   'numbers after Z with no command should error, not hang',
-  { skip: "BUG: parse('M0 0 L10 0 Z 5 5') never returns — implicit repetition re-dispatches Z, which consumes no input, so the scanner never advances (infinite loop). Verified: subprocess still running after 3s kill-timer." },
   () => {
     // Per SVG spec, Z takes no parameters, so trailing numbers are invalid
     // path data and should raise a parse error.

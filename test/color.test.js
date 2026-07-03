@@ -68,7 +68,7 @@ test('hex with invalid length or leading garbage digits -> null', () => {
   assert.strictEqual(parse('#gg0000'), null);
 });
 
-test('hex with trailing non-hex garbage in a pair -> null', { skip: 'BUG: parseInt leniency accepts invalid hex, e.g. #12345g -> {r:18/255,g:52/255,b:5/255} because parseInt("5g",16)===5' }, () => {
+test('hex with trailing non-hex garbage in a pair -> null', () => {
   assert.strictEqual(parse('#12345g'), null);
   assert.strictEqual(parse('#1x2x3x'), null);
 });

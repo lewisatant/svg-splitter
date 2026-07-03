@@ -226,13 +226,6 @@ test('compute: "inherit" keyword at the root falls back to initial', () => {
 
 test(
   'compute: "inherit" keyword on non-inherited prop (opacity) takes parent computed value',
-  {
-    skip:
-      'BUG: style.compute treats "inherit" as null then applies the default-inheritance ' +
-      'flag, so opacity:"inherit" with parent opacity 0.5 computes "1" (initial) instead ' +
-      'of "0.5". Per CSS 2.1 / SVG 1.1 the inherit keyword forces inheritance for all ' +
-      'properties, including non-inherited ones.',
-  },
   () => {
     const parent = style.compute(el('g', { opacity: '0.5' }), null, null);
     const child = style.compute(el('rect', { opacity: 'inherit' }), parent, null);

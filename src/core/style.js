@@ -148,9 +148,11 @@ SVGSPLIT.style = (function () {
         if (attrVal.length > 0) value = attrVal;
       }
 
-      if (value === 'inherit') value = null;
-
-      if (value === null) {
+      if (value === 'inherit') {
+        // explicit 'inherit' takes the parent value even for
+        // non-inherited properties
+        value = parentComputed ? parentComputed[prop] : meta.initial;
+      } else if (value === null) {
         if (meta.inherit && parentComputed) {
           value = parentComputed[prop];
         } else {

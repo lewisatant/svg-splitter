@@ -66,6 +66,7 @@ SVGSPLIT.color = (function () {
   }
 
   function parseHex(hex) {
+    if (!/^[0-9a-fA-F]+$/.test(hex)) return null;
     var r, g, b, a = 1;
     if (hex.length === 3 || hex.length === 4) {
       r = parseInt(hex.charAt(0) + hex.charAt(0), 16);

@@ -5,7 +5,7 @@
   "description": "After Effects ScriptUI panel that splits a Figma-exported SVG into AE shape layers",
   "scripts": {
     "build": "node build.js",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.js",
     "e2e": "node test/e2e/run.js"
   },
   "devDependencies": {

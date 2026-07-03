@@ -259,6 +259,9 @@ SVGSPLIT.path = (function () {
         cmd = lastCmd;
         if (cmd === 'M') cmd = 'L';
         if (cmd === 'm') cmd = 'l';
+        // Z takes no arguments, so trailing data after Z can never be
+        // consumed as a repetition - that's malformed path data.
+        if (cmd === 'Z' || cmd === 'z') scanner.fail('unexpected data after Z');
       }
       var rel = cmd >= 'a' && cmd <= 'z';
       var CMD = rel ? cmd.toUpperCase() : cmd;

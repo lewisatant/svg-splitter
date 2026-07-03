@@ -292,7 +292,7 @@ test('single-stop gradient collapses to a solid paint', () => {
   );
   const fill = scene.layers[0].items[0].fill;
   assert.strictEqual(fill.paint.type, 'solid');
-  assert.deepStrictEqual(fill.paint.color, { r: 1, g: 0, b: 0 });
+  assert.deepStrictEqual(norm(fill.paint.color), { r: 1, g: 0, b: 0 });
   assertClose(fill.opacity, 0.5, 1e-9, 'stop opacity carried into solid');
 });
 
@@ -311,8 +311,8 @@ test('gradient with no own stops falls back to href-referenced gradient stops', 
   const paint = scene.layers[0].items[0].fill.paint;
   assert.strictEqual(paint.type, 'gradient');
   assert.strictEqual(paint.stops.length, 2);
-  assert.deepStrictEqual(paint.stops[0].color, { r: 1, g: 0, b: 0 });
-  assert.deepStrictEqual(paint.stops[1].color, { r: 0, g: 0, b: 1 });
+  assert.deepStrictEqual(norm(paint.stops[0].color), { r: 1, g: 0, b: 0 });
+  assert.deepStrictEqual(norm(paint.stops[1].color), { r: 0, g: 0, b: 1 });
 });
 
 // ---------------------------------------------------------------- currentColor
@@ -323,7 +323,7 @@ test('currentColor fill resolves through the color property', () => {
   );
   const paint = scene.layers[0].items[0].fill.paint;
   assert.strictEqual(paint.type, 'solid');
-  assert.deepStrictEqual(paint.color, { r: 0, g: 1, b: 0 });
+  assert.deepStrictEqual(norm(paint.color), { r: 0, g: 1, b: 0 });
 });
 
 // ---------------------------------------------------------------- visibility / display
@@ -458,7 +458,7 @@ test('<image> becomes a placeholder rect item plus a warning', () => {
   assert.strictEqual(scene.layers.length, 1);
   const item = scene.layers[0].items[0];
   assert.strictEqual(item.fill.paint.type, 'placeholder');
-  assert.deepStrictEqual(S.path.bounds(item.contours), { minX: 5, minY: 5, maxX: 55, maxY: 35 });
+  assert.deepStrictEqual(norm(S.path.bounds(item.contours)), { minX: 5, minY: 5, maxX: 55, maxY: 35 });
   assert.ok(hasWarning(scene.layers[0].warnings, /<image> not supported/));
 });
 

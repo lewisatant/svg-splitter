@@ -659,7 +659,15 @@ SVGSPLIT.scene = (function () {
       var contours = null;
       if (name === 'path') {
         var d = attrOr(node, 'd', '');
-        if (d) contours = pathMod.parse(d).contours;
+        if (d) {
+          try {
+            contours = pathMod.parse(d).contours;
+          } catch (ePath) {
+            sink.warn('bad path data on <path' + (node.attrs.id ? ' id="' + node.attrs.id + '"' : '') +
+              '>: ' + ePath.message + '; element skipped');
+            return;
+          }
+        }
       } else if (DRAWABLES[name]) {
         contours = shapesMod.contoursFor(name, node.attrs);
       } else {
