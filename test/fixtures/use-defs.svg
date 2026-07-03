@@ -1,0 +1,8 @@
+<svg width="100" height="40" viewBox="0 0 100 40" fill="none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<use xlink:href="#star_402" fill="#FF3D00"/>
+<use xlink:href="#star_402" x="30" fill="#2962FF"/>
+<use xlink:href="#star_402" x="60" fill="#00C853"/>
+<defs>
+<path id="star_402" d="M20 4L24 14L34 14L26 21L29 31L20 25L11 31L14 21L6 14L16 14Z"/>
+</defs>
+</svg>

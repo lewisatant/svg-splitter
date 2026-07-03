@@ -1,0 +1,7 @@
+<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M8 18L30 42L52 18L74 42L92 22" stroke="#E91E63" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M8 56H92" stroke="#00BCD4" stroke-width="3" stroke-linecap="butt" stroke-dasharray="4 2"/>
+<path d="M8 68H92" stroke="#7C4DFF" stroke-width="3" stroke-opacity="0.7" stroke-dasharray="8 4 2 4" stroke-dashoffset="6"/>
+<path d="M14 94L28 78L42 94H14Z" stroke="#FF9100" stroke-width="3" stroke-linejoin="miter" stroke-miterlimit="10"/>
+<rect x="58" y="80" width="32" height="14" stroke="#00E676" stroke-width="3" stroke-linejoin="bevel"/>
+</svg>
