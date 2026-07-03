@@ -1,0 +1,16 @@
+{
+  "name": "svg-splitter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "After Effects ScriptUI panel that splits a Figma-exported SVG into AE shape layers",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test test/",
+    "e2e": "node test/e2e/run.js"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "pixelmatch": "^6.0.0",
+    "pngjs": "^7.0.0"
+  }
+}
