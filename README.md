@@ -5,13 +5,17 @@ splits it into individual AE **shape layers** — preserving position, fills,
 strokes, gradients, and layer structure — so you can animate your Figma
 designs without retracing anything.
 
-![panel](docs/panel.png)
+Verified end-to-end: the automated test suite drives a real After Effects
+2026 instance over 13 Figma-style fixture SVGs and pixel-compares AE's render
+against headless Chrome — 9 of 11 comparable fixtures match **pixel-perfect
+(0.00% diff)**, the rest are within small documented tolerances.
 
 ## Install
 
 1. Run `node build.js` (or grab `dist/SVG Splitter.jsx`).
 2. Copy `dist/SVG Splitter.jsx` into After Effects' ScriptUI Panels folder:
-   - macOS: `/Applications/Adobe After Effects 2026/Scripts/ScriptUI Panels/`
+   - macOS (app-wide, needs admin): `/Applications/Adobe After Effects 2026/Scripts/ScriptUI Panels/`
+   - macOS (per-user): `~/Documents/Adobe/After Effects 2026/Scripts/ScriptUI Panels/`
    - Windows: `C:\Program Files\Adobe\Adobe After Effects 2026\Support Files\Scripts\ScriptUI Panels\`
 3. Restart AE. The panel appears under **Window > SVG Splitter.jsx**.
 
@@ -85,5 +89,20 @@ The core (`src/core/`) is dependency-free ES3 JavaScript that runs unmodified
 in both Node and ExtendScript. The AE side lives in `src/ae/`; `build.js`
 concatenates everything into the single distributable `.jsx`.
 
-Gradient stop injection adapts the technique from
-[Google AEUX](https://github.com/google/AEUX) (Apache-2.0).
+### How gradients work (the .ffx trick)
+
+AE has never exposed shape-layer gradient color stops to scripting
+(`ADBE Vector Grad Colors` is `NO_VALUE` through AE 26.x). The tool applies
+them by generating a temporary animation preset: a canonical AE 2026-authored
+G-Fill preset (`tools/probe-canonical.ffx`) is used as the container, the
+`Gradient Color Data` XML inside its RIFX `Utf8` chunk is regenerated for the
+actual stops, ancestor chunk sizes are patched by the length delta, and the
+preset is applied with the target property selected. Slot fidelity is verified
+by round-tripping through a saved project. (The classic AEUX-era template
+approach silently corrupts stop colors on AE 2026 because its RIFX sizes are
+stale — AE truncates the XML mid-parse.) To regenerate the container from a
+new AE version: build any shape-layer Gradient Fill, select the property,
+Animation > Save Animation Preset…, then
+`node tools/gen-grad-template.js path/to/preset.ffx`.
+
+Technique lineage: [Google AEUX](https://github.com/google/AEUX) (Apache-2.0).

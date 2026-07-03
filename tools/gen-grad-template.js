@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const src = process.argv[2] || path.join(ROOT, 'test', 'e2e', 'out', 'probe-canonical.ffx');
+const src = process.argv[2] || path.join(ROOT, 'tools', 'probe-canonical.ffx');
 const buf = fs.readFileSync(src);
 
 // sanity: verify RIFX structure and locate the gradient XML
