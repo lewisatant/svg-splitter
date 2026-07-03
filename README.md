@@ -1,108 +1,137 @@
-# SVG Splitter
+<p align="center">
+  <img src="docs/banner.png" alt="SVG Splitter — Figma designs to After Effects shape layers" width="100%"/>
+</p>
 
-An After Effects ScriptUI panel that takes an SVG exported from Figma and
-splits it into individual AE **shape layers** — preserving position, fills,
-strokes, gradients, and layer structure — so you can animate your Figma
-designs without retracing anything.
+<p align="center">
+  <em>Export a frame from Figma. Get your layers back in After Effects — named, positioned, editable.</em>
+</p>
 
-Verified end-to-end: the automated test suite drives a real After Effects
-2026 instance over 13 Figma-style fixture SVGs and pixel-compares AE's render
-against headless Chrome — 9 of 11 comparable fixtures match **pixel-perfect
-(0.00% diff)**, the rest are within small documented tolerances.
+<br/>
+
+After Effects has never had a good answer for SVG. Files import rasterized or as a single flattened
+layer, and every workaround routes through Illustrator. **SVG Splitter** is a dockable ScriptUI
+panel that reads a Figma-exported SVG directly and rebuilds it as native AE **shape layers** — one
+layer per Figma layer, every anchor point centered, every element exactly where you designed it.
+
+It is verified the honest way: an automated suite drives a real After Effects instance over a
+battery of Figma-style SVGs, renders each converted comp, and pixel-compares the frame against
+headless Chrome rendering the original file. Most fixtures — including a real 3840×2160 Figma
+slide — match at **0.00% difference**.
+
+<br/>
 
 ## Install
 
-1. Run `node build.js` (or grab `dist/SVG Splitter.jsx`).
-2. Copy `dist/SVG Splitter.jsx` into After Effects' ScriptUI Panels folder:
-   - macOS (app-wide, needs admin): `/Applications/Adobe After Effects 2026/Scripts/ScriptUI Panels/`
-   - macOS (per-user): `~/Documents/Adobe/After Effects 2026/Scripts/ScriptUI Panels/`
-   - Windows: `C:\Program Files\Adobe\Adobe After Effects 2026\Support Files\Scripts\ScriptUI Panels\`
-3. Restart AE. The panel appears under **Window > SVG Splitter.jsx**.
+1. Grab [`dist/SVG Splitter.jsx`](dist/SVG%20Splitter.jsx) (or build it yourself — see Development).
+2. Copy it into After Effects' ScriptUI Panels folder:
 
-Alternatively run it once via **File > Scripts > Run Script File…** (floating
-palette, no install).
+   | Platform | Path |
+   |---|---|
+   | macOS | `/Applications/Adobe After Effects 2026/Scripts/ScriptUI Panels/` |
+   | Windows | `C:\Program Files\Adobe\Adobe After Effects 2026\Support Files\Scripts\ScriptUI Panels\` |
 
-For full gradient support, enable
-**Preferences > Scripting & Expressions > Allow Scripts to Write Files and
-Access Network** (the gradient color stops are injected via a temporary
-`.ffx` preset — an After Effects scripting-API limitation).
+3. Restart AE. The panel appears under **Window → SVG Splitter.jsx** and docks like any native panel.
+
+> **For gradients:** enable *Preferences → Scripting & Expressions → Allow Scripts to Write Files
+> and Access Network*. Gradient color stops aren't scriptable in AE, so the panel injects them
+> through a temporary animation preset — the panel will remind you if the preference is off.
 
 ## Exporting from Figma
 
-- Turn **"Include id attribute"** ON in Figma's SVG export options. Figma then
-  keeps your layer names and group hierarchy; without it you get anonymous
-  flat paths (the import still works, but layers are named `path 1`, `path 2`, …).
-- Text: Figma outlines text by default (imports as shapes). Untick
-  "Outline text" to get real editable AE text layers (font matching is
-  best-effort).
-- The default **"Simplify stroke"** export option is fine — inside/outside
-  strokes arrive as center strokes.
+- Turn **"Include id attribute" on** in the SVG export options — that's what carries your layer
+  names and grouping into AE. Without it the import still works, but layers arrive as anonymous
+  `path 1`, `path 2`, …
+- Leave **"Simplify stroke"** on (default). Inside/outside strokes arrive as correct center strokes.
+- **"Outline text"** is your choice: on (default) imports text as shapes; off creates real,
+  editable AE text layers with best-effort font matching.
 
 ## Usage
 
-1. **Choose SVG…** — pick the exported file.
-2. Split mode:
-   - **One layer per top-level group** (default): each top-level Figma
-     layer/group becomes one AE shape layer with its inner paths grouped inside.
-   - **One layer per shape**: fully exploded; every path/rect/ellipse becomes
-     its own layer (named by its hierarchy breadcrumb).
-3. **Create Layers.** A comp sized to the SVG viewBox is created (or layers are
-   added to the active comp if "Create new composition" is off). Warnings for
-   anything that couldn't be converted 1:1 appear in the log list.
-
-Every layer gets its anchor point at its visual center and sits exactly where
-it was in the design — position, scale and rotation are immediately animatable.
+1. **Choose SVG…** and pick your export.
+2. Pick a split mode:
+   - **One layer per top-level group** — mirrors your Figma layer list. Sub-shapes stay grouped
+     inside each layer. *(default)*
+   - **One layer per shape** — fully exploded; every path becomes its own layer, named by its
+     place in the hierarchy.
+3. **Create Layers.** A comp sized to the SVG is created (or layers land in your active comp),
+   and anything that couldn't convert 1:1 is listed in the log at the bottom of the panel.
 
 ## What converts
 
 | SVG | After Effects |
 |---|---|
-| `path` (all commands, arcs, holes) | Shape paths (multi-contour, correct fill rule) |
-| `rect`/`circle`/`ellipse`/`line`/`polyline`/`polygon` | Shape paths |
-| transforms (nested, `rotate(a cx cy)`, `matrix`) | Baked into geometry (pixel-exact) |
-| fills + `fill-opacity` + `fill-rule` | Fill (Even-Odd supported) |
-| strokes: width, cap, join, miter, dashes, offset | Stroke (dash pairs capped at 3 by AE) |
-| linear/radial gradients incl. per-stop alpha | Gradient Fill/Stroke with real stops (.ffx injection) |
-| group/element `opacity` | Flattened into fill/stroke opacity |
+| `path` — all commands, arcs, compound paths with holes | Shape paths, multi-contour, correct fill rule |
+| `rect` / `circle` / `ellipse` / `line` / `polyline` / `polygon` | Shape paths |
+| Nested transforms, `rotate(a cx cy)`, `matrix(…)` flips | Baked into geometry — pixel-exact |
+| Fills, `fill-opacity`, `fill-rule="evenodd"` | Fill with Even-Odd winding |
+| Strokes: width, caps, joins, miter, dash arrays, offset | Stroke (AE caps dashes at 3 pairs) |
+| Linear & radial gradients, per-stop alpha, `gradientTransform` | Gradient Fill / Stroke with real color stops |
+| Element & group `opacity` | Flattened into fill/stroke opacity |
 | `mix-blend-mode` | Layer blending mode |
-| Figma drop shadow filter | native AE **Drop Shadow** effect |
-| Figma layer blur filter | native AE **Gaussian Blur** effect |
-| `clipPath` (Figma frame clips) | ignored when it equals the canvas; otherwise Merge Paths ∩ |
-| `<text>` (non-outlined) | AE text layer (baseline-aligned; font best-effort) |
-| `<use>`/`defs` | resolved inline |
+| Figma drop shadow filters (incl. multi-shadow) | Native **Drop Shadow** effect |
+| Figma layer blur filters | Native **Gaussian Blur** effect |
+| `clipPath` (frame clips, compound clips) | Ignored when canvas-sized; otherwise Merge Paths ∩ |
+| Live `<text>` (Outline text off) | AE text layers, baseline-aligned |
+| `<use>` / `defs` references | Resolved inline |
 
-**Warned & skipped (v1):** masks (imported unmasked), inner shadows,
-background blur, image/pattern fills (gray placeholder), angular gradients
-(Figma exports these incorrectly as radial anyway).
+**Warned & skipped in v1:** masks (content imports unmasked), inner shadows, background blur,
+image/pattern fills (gray placeholder), angular gradients (Figma exports those incorrectly anyway).
+
+## How it's verified
+
+```
+npm run e2e
+```
+
+The end-to-end suite launches After Effects, runs the converter over every fixture in
+`test/fixtures/`, exports a rendered frame, renders the same SVG in headless Chrome, and
+pixel-diffs the two:
+
+```
+pass   clip-compound.svg     0.00%      pass   kitchen-sink.svg     0.01%
+pass   clip-nested.svg       0.00%      pass   primitives.svg       0.00%
+pass   flat-no-ids.svg       0.00%      pass   strokes-dashes.svg   0.00%
+pass   gradients.svg         0.00%      pass   shadow-blur.svg      1.07%
+pass   groups-transforms.svg 0.00%      pass   opacity-blend.svg    5.90%
+pass   icons-holes.svg       0.00%      pass   use-defs.svg         0.00%
+```
+
+The two non-zero results are antialiasing falloff on blurs and the documented group-opacity
+flattening divergence. Drop your own problematic export into `test/fixtures/` and the harness
+will tell you exactly which pixels disagree, with side-by-side artifacts in `test/e2e/out/`.
+
+There are also **237 unit tests** (`npm test`) over the parsing/geometry core, which is plain
+dependency-free ES3 JavaScript that runs identically in Node and ExtendScript.
 
 ## Development
 
 ```
 npm install
-npm test          # 221 unit tests over the ES3 core (Node)
-node build.js     # lint (ES3 gate) + bundle dist/
-npm run e2e       # full pipeline: drives AE 2026 via AppleScript, renders
-                  # each fixture, pixel-diffs against headless-Chrome ground truth
+npm test          # unit tests (Node)
+node build.js     # ES3 lint gate + bundle → dist/SVG Splitter.jsx
+npm run e2e       # full AE ↔ Chrome pixel verification (macOS, AE 2026)
 ```
 
-The core (`src/core/`) is dependency-free ES3 JavaScript that runs unmodified
-in both Node and ExtendScript. The AE side lives in `src/ae/`; `build.js`
-concatenates everything into the single distributable `.jsx`.
+Layout: `src/core/` is the SVG pipeline (XML parser, path/arc math, transforms, style cascade,
+scene builder) — pure ES3, shared verbatim between Node tests and the AE runtime. `src/ae/` is
+the ExtendScript side (shape builder, gradient injection, ScriptUI panel). `build.js`
+concatenates everything into the single distributable file.
 
-### How gradients work (the .ffx trick)
+### The gradient trick
 
-AE has never exposed shape-layer gradient color stops to scripting
-(`ADBE Vector Grad Colors` is `NO_VALUE` through AE 26.x). The tool applies
-them by generating a temporary animation preset: a canonical AE 2026-authored
-G-Fill preset (`tools/probe-canonical.ffx`) is used as the container, the
-`Gradient Color Data` XML inside its RIFX `Utf8` chunk is regenerated for the
-actual stops, ancestor chunk sizes are patched by the length delta, and the
-preset is applied with the target property selected. Slot fidelity is verified
-by round-tripping through a saved project. (The classic AEUX-era template
-approach silently corrupts stop colors on AE 2026 because its RIFX sizes are
-stale — AE truncates the XML mid-parse.) To regenerate the container from a
-new AE version: build any shape-layer Gradient Fill, select the property,
-Animation > Save Animation Preset…, then
-`node tools/gen-grad-template.js path/to/preset.ffx`.
+AE's `ADBE Vector Grad Colors` property has been unscriptable since 2007. This tool writes the
+stops anyway: a canonical AE-2026-authored preset ([`tools/probe-canonical.ffx`](tools/probe-canonical.ffx))
+is used as a container, the `Gradient Color Data` XML inside its RIFX `Utf8` chunk is regenerated
+for the actual stops, ancestor chunk sizes are patched by the length delta, and the preset is
+applied with the target property selected. The classic AEUX-era template approach silently
+corrupts colors on modern AE — its stale RIFX sizes make AE truncate the XML mid-parse — which
+this repo diagnoses and fixes; the full story is in [`src/ae/gradients.jsx`](src/ae/gradients.jsx).
+To regenerate the container for a future AE version: save any shape-layer Gradient Fill as an
+animation preset, then `node tools/gen-grad-template.js path/to/preset.ffx`.
 
-Technique lineage: [Google AEUX](https://github.com/google/AEUX) (Apache-2.0).
+## Credits
+
+Gradient stop injection builds on the technique from
+[Google AEUX](https://github.com/google/AEUX) (Apache-2.0). Everything else was written for this
+project — with a very large assist from an automated verification loop that rendered every change
+inside a real copy of After Effects.

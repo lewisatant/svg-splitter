@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head>
+<style>html,body{margin:0;padding:0}</style>
+</head>
+<body>
+<svg width="1600" height="420" viewBox="0 0 1600 420" xmlns="http://www.w3.org/2000/svg">
+  <!-- Claude paper background -->
+  <rect width="1600" height="420" fill="#F0EEE6"/>
+
+  <!-- starburst mark -->
+  <g transform="translate(120,120)">
+    <g stroke="#D97757" stroke-width="7" stroke-linecap="round">
+      <line x1="0" y1="-30" x2="0" y2="30"/>
+      <line x1="-30" y1="0" x2="30" y2="0"/>
+      <line x1="-21" y1="-21" x2="21" y2="21"/>
+      <line x1="-21" y1="21" x2="21" y2="-21"/>
+    </g>
+    <circle r="7" fill="#F0EEE6" stroke="#D97757" stroke-width="5"/>
+  </g>
+
+  <!-- title -->
+  <text x="180" y="145" font-family="Georgia, 'Times New Roman', serif" font-size="84" fill="#141413" letter-spacing="-1">SVG Splitter</text>
+  <text x="184" y="205" font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-size="30" fill="#87867F">Figma designs &#8594; After Effects shape layers</text>
+
+  <!-- little feature line -->
+  <text x="186" y="290" font-family="Helvetica, Arial, sans-serif" font-size="19" fill="#5E5D59" letter-spacing="0.3">One dockable panel. Every layer lands exactly where you designed it &#8212;</text>
+  <text x="186" y="320" font-family="Helvetica, Arial, sans-serif" font-size="19" fill="#5E5D59" letter-spacing="0.3">paths, gradients, strokes, shadows &#8212; verified pixel-for-pixel against the browser.</text>
+
+  <!-- exploded layers illustration (right) -->
+  <g transform="translate(1150,58)">
+    <!-- dashed connectors -->
+    <g stroke="#B0ADA3" stroke-width="2.5" stroke-dasharray="2 9" stroke-linecap="round">
+      <line x1="150" y1="46" x2="150" y2="120"/>
+      <line x1="150" y1="130" x2="150" y2="204"/>
+      <line x1="150" y1="214" x2="150" y2="290"/>
+    </g>
+
+    <!-- top plane: circle layer -->
+    <g transform="translate(0,0)">
+      <path d="M60 30 L240 30 L300 66 L120 66 Z" fill="#FAF9F5" stroke="#141413" stroke-width="3" stroke-linejoin="round"/>
+      <ellipse cx="180" cy="48" rx="26" ry="11" fill="#D97757"/>
+    </g>
+
+    <!-- middle plane: squiggle layer -->
+    <g transform="translate(0,84)">
+      <path d="M60 30 L240 30 L300 66 L120 66 Z" fill="#FAF9F5" stroke="#141413" stroke-width="3" stroke-linejoin="round"/>
+      <path d="M120 52 C140 34, 158 60, 178 44 C198 28, 216 56, 238 42" fill="none" stroke="#629A90" stroke-width="7" stroke-linecap="round"/>
+    </g>
+
+    <!-- bottom plane: rect layer -->
+    <g transform="translate(0,168)">
+      <path d="M60 30 L240 30 L300 66 L120 66 Z" fill="#FAF9F5" stroke="#141413" stroke-width="3" stroke-linejoin="round"/>
+      <path d="M138 38 L216 38 L238 58 L160 58 Z" fill="#C2C0B6"/>
+    </g>
+
+    <!-- base plane: the composed design -->
+    <g transform="translate(0,252)">
+      <path d="M60 30 L240 30 L300 66 L120 66 Z" fill="#141413" stroke="#141413" stroke-width="3" stroke-linejoin="round"/>
+      <ellipse cx="164" cy="44" rx="18" ry="7.5" fill="#D97757"/>
+      <path d="M150 56 C164 46, 176 60, 190 50 C200 43, 210 56, 224 48" fill="none" stroke="#629A90" stroke-width="5" stroke-linecap="round"/>
+      <path d="M196 38 L232 38 L248 52 L212 52 Z" fill="#C2C0B6" opacity="0.9"/>
+    </g>
+  </g>
+</svg>
+</body>
+</html>
