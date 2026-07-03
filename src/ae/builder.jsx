@@ -9,6 +9,8 @@ SVGSPLIT.ae = (function () {
   var JOINS = { miter: 1, round: 2, bevel: 3 };
   var FILL_RULE_NONZERO = 1;
   var FILL_RULE_EVENODD = 2;
+  var MERGE_MERGE = 1;
+  var MERGE_ADD = 2;
   var MERGE_INTERSECT = 4;
 
   // Empirical render-match factors (calibrated in E2E against Chrome):
@@ -63,6 +65,25 @@ SVGSPLIT.ae = (function () {
     }
     prop.property('ADBE Vector Shape').setValue(contourToShape(contour, offsetX, offsetY));
     return prop;
+  }
+
+  // Adds a set of contours as ONE merge-paths operand: a single path directly,
+  // or a nested group whose own Merge combines the contours into one compound
+  // path (innerMode: MERGE_MERGE preserves subpath/hole structure for shape
+  // content, MERGE_ADD unions overlapping clip children).
+  function addContourSet(contents, contours, innerMode, nameHint) {
+    if (contours.length === 1) {
+      addContour(contents, contours[0], 0, 0, nameHint);
+      return;
+    }
+    var group = contents.addProperty('ADBE Vector Group');
+    try { group.name = nameHint; } catch (eName) { /* keep default */ }
+    var inner = group.property('ADBE Vectors Group');
+    for (var i = 0; i < contours.length; i++) {
+      addContour(inner, contours[i], 0, 0, null);
+    }
+    var merge = inner.addProperty('ADBE Vector Filter - Merge');
+    merge.property('ADBE Vector Merge Type').setValue(innerMode);
   }
 
   function setDashes(strokeProp, dashes, dashOffset, warn) {
@@ -124,18 +145,22 @@ SVGSPLIT.ae = (function () {
       var groupContents = group.property('ADBE Vectors Group');
 
       var ci;
-      for (ci = 0; ci < item.contours.length; ci++) {
-        addContour(groupContents, item.contours[ci], 0, 0, null);
-      }
-      // Clip emulation: clip contours + Merge Paths (Intersect) consume
-      // everything above them in this group.
-      for (var cs = 0; cs < item.clips.length; cs++) {
-        var clipSet = item.clips[cs];
-        for (ci = 0; ci < clipSet.length; ci++) {
-          addContour(groupContents, clipSet[ci], 0, 0, 'Clip');
+      if (item.clips.length === 0) {
+        for (ci = 0; ci < item.contours.length; ci++) {
+          addContour(groupContents, item.contours[ci], 0, 0, null);
         }
-        var merge = groupContents.addProperty('ADBE Vector Filter - Merge');
-        merge.property('ADBE Vector Merge Type').setValue(MERGE_INTERSECT);
+      } else {
+        // Clip emulation. Merge Paths Intersect consumes ALL paths above it,
+        // so multi-contour operands must first be combined into ONE compound
+        // path each (in a nested group with its own Merge) - otherwise the
+        // item's own subpaths would be intersected with each other.
+        addContourSet(groupContents, item.contours, MERGE_MERGE, 'Shape');
+        for (var cs = 0; cs < item.clips.length; cs++) {
+          // clip children combine as a union per SVG clipping semantics
+          addContourSet(groupContents, item.clips[cs], MERGE_ADD, 'Clip');
+          var merge = groupContents.addProperty('ADBE Vector Filter - Merge');
+          merge.property('ADBE Vector Merge Type').setValue(MERGE_INTERSECT);
+        }
       }
 
       // Stroke first so it renders above the fill (SVG paint order).
@@ -289,11 +314,14 @@ SVGSPLIT.ae = (function () {
         var spec = scene.layers[i];
         if (opts.onProgress) opts.onProgress(i + 1, totalLayers, spec.name);
         var layer = null;
-        if (spec.kind === 'text') {
-          var textLayers = buildTextLayers(comp, spec, warn);
-          layer = textLayers.length > 0 ? textLayers[0] : null;
-        } else {
+        // A spec can carry both shape items and text runs (e.g. a Figma frame
+        // with a background shape and live text) - build both.
+        if (spec.items.length > 0) {
           layer = buildShapeLayer(comp, spec, opts, warn);
+        }
+        if (spec.textRuns.length > 0) {
+          var textLayers = buildTextLayers(comp, spec, warn);
+          if (!layer) layer = textLayers.length > 0 ? textLayers[0] : null;
         }
         if (layer) {
           if (spec.blendMode) {

@@ -22,13 +22,18 @@ SVGSPLIT.aegrad = (function () {
     var out = [];
     for (var i = 0; i < n; i++) {
       var t = i / (n - 1);
+      // clamp outside the stop range (pad semantics), never extrapolate
       var lo = stops[0];
-      var hi = stops[stops.length - 1];
-      for (var j = 0; j < stops.length - 1; j++) {
-        if (stops[j].offset <= t && stops[j + 1].offset >= t) {
-          lo = stops[j];
-          hi = stops[j + 1];
-          break;
+      var hi = stops[0];
+      if (t >= stops[stops.length - 1].offset) {
+        lo = hi = stops[stops.length - 1];
+      } else if (t > stops[0].offset) {
+        for (var j = 0; j < stops.length - 1; j++) {
+          if (stops[j].offset <= t && stops[j + 1].offset >= t) {
+            lo = stops[j];
+            hi = stops[j + 1];
+            break;
+          }
         }
       }
       var span = hi.offset - lo.offset;

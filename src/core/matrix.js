@@ -87,10 +87,11 @@ SVGSPLIT.matrix = (function () {
     var match;
     while ((match = re.exec(text)) !== null) {
       var fn = match[1];
-      var rawArgs = match[2].replace(/^[\s,]+|[\s,]+$/g, '');
+      // tokenize numbers directly - SVGO-style packed args ("10-5", ".5.5")
+      // use the sign/dot as separator, which whitespace splitting misses
+      var pieces = match[2].match(/[+-]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?/g);
       var args = [];
-      if (rawArgs.length > 0) {
-        var pieces = rawArgs.split(/[\s,]+/);
+      if (pieces) {
         for (var i = 0; i < pieces.length; i++) args[args.length] = parseFloat(pieces[i]);
       }
       var t = null;

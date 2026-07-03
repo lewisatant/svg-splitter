@@ -106,10 +106,11 @@ SVGSPLIT.matrix = (function () {
     var match;
     while ((match = re.exec(text)) !== null) {
       var fn = match[1];
-      var rawArgs = match[2].replace(/^[\s,]+|[\s,]+$/g, '');
+      // tokenize numbers directly - SVGO-style packed args ("10-5", ".5.5")
+      // use the sign/dot as separator, which whitespace splitting misses
+      var pieces = match[2].match(/[+-]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?/g);
       var args = [];
-      if (rawArgs.length > 0) {
-        var pieces = rawArgs.split(/[\s,]+/);
+      if (pieces) {
         for (var i = 0; i < pieces.length; i++) args[args.length] = parseFloat(pieces[i]);
       }
       var t = null;
@@ -1530,14 +1531,17 @@ SVGSPLIT.scene = (function () {
 
     var isObb = units === 'objectBoundingBox';
 
-    // Gradient coordinate: percentages are fractions of the bbox for
-    // objectBoundingBox units, or of the viewport dimension for userSpaceOnUse.
-    function gradCoord(attrName, fallback, viewportSize) {
+    // Gradient coordinate: percentages (and the spec's percentage DEFAULTS,
+    // passed as fractions) resolve against the bbox for objectBoundingBox
+    // units, or against the user-unit viewport for userSpaceOnUse.
+    function gradCoord(attrName, defFraction, viewportSize) {
       var v = gradNode.attrs[attrName];
-      if (v === undefined || v === null || v === '') return fallback;
+      if (v === undefined || v === null || v === '') {
+        return isObb ? defFraction : defFraction * viewportSize;
+      }
       var s = String(v);
       var f = parseFloat(s);
-      if (isNaN(f)) return fallback;
+      if (isNaN(f)) return isObb ? defFraction : defFraction * viewportSize;
       if (s.indexOf('%') !== -1) return isObb ? f / 100 : f / 100 * viewportSize;
       return f;
     }
@@ -1545,10 +1549,11 @@ SVGSPLIT.scene = (function () {
     var vpH = viewport[1];
     var vpDiag = Math.sqrt((vpW * vpW + vpH * vpH) / 2);
 
+    // spec defaults: x1=0% y1=0% x2=100% y2=0%; cx=cy=r=50%; fx/fy default to cx/cy
     if (kind === 'linear') {
       var x1 = gradCoord('x1', 0, vpW);
       var y1 = gradCoord('y1', 0, vpH);
-      var x2 = gradCoord('x2', isObb ? 1 : 0, vpW);
+      var x2 = gradCoord('x2', 1, vpW);
       var y2 = gradCoord('y2', 0, vpH);
       var start = matrix.apply(m, x1, y1);
       var end = matrix.apply(m, x2, y2);
@@ -1556,11 +1561,11 @@ SVGSPLIT.scene = (function () {
     }
 
     // radial
-    var cx = gradCoord('cx', isObb ? 0.5 : 0, vpW);
-    var cy = gradCoord('cy', isObb ? 0.5 : 0, vpH);
-    var r = gradCoord('r', isObb ? 0.5 : 1, vpDiag);
-    var fx = gradCoord('fx', cx, vpW);
-    var fy = gradCoord('fy', cy, vpH);
+    var cx = gradCoord('cx', 0.5, vpW);
+    var cy = gradCoord('cy', 0.5, vpH);
+    var r = gradCoord('r', 0.5, vpDiag);
+    var fx = gradNode.attrs.fx === undefined ? cx : gradCoord('fx', 0.5, vpW);
+    var fy = gradNode.attrs.fy === undefined ? cy : gradCoord('fy', 0.5, vpH);
     var center = matrix.apply(m, cx, cy);
     var rp1 = matrix.apply(m, cx + r, cy);
     var rp2 = matrix.apply(m, cx, cy + r);
@@ -1604,6 +1609,8 @@ SVGSPLIT.scene = (function () {
   }
 
   // Returns { effects: [...], warnings: [...] }
+  // Figma chains multiple effects in one filter (id like filter0_dd_...) -
+  // each drop-shadow chain ends in a feBlend, so the accumulator resets there.
   function decodeFilter(filterNode) {
     var prims = [];
     for (var i = 0; i < filterNode.children.length; i++) {
@@ -1613,74 +1620,89 @@ SVGSPLIT.scene = (function () {
     var warnings = [];
     var fid = attrOr(filterNode, 'id', '?');
 
-    var dx = 0, dy = 0, std = 0;
-    var hasOffset = false, hasBlur = false, hasCompositeOut = false, hasInner = false;
-    var hasMorphology = false;
-    var shadowColor = { r: 0, g: 0, b: 0 };
-    var shadowOpacity = 1;
-    var sawDropShadowPrim = null;
+    var hasBlur = false;
+    var lastStd = 0;
+    var innerCount = 0;
+    var chain = null;
+
+    function freshChain() {
+      return {
+        dx: 0, dy: 0, std: 0, hasOffset: false, hasCompositeOut: false,
+        inner: false, morph: false,
+        color: { r: 0, g: 0, b: 0 }, opacity: 1
+      };
+    }
+    chain = freshChain();
+
+    function flushChain() {
+      if (chain.inner) {
+        innerCount++;
+      } else if (chain.hasOffset || chain.hasCompositeOut) {
+        effects[effects.length] = {
+          type: 'dropShadow', dx: chain.dx, dy: chain.dy, stdDeviation: chain.std,
+          color: chain.color, opacity: chain.opacity
+        };
+        if (chain.morph) {
+          warnings[warnings.length] = 'shadow spread (feMorphology, filter #' + fid + ') approximated without spread';
+        }
+      }
+      chain = freshChain();
+    }
 
     for (var p = 0; p < prims.length; p++) {
       var prim = prims[p];
       var pname = localName(prim);
       if (pname === 'feOffset') {
-        hasOffset = true;
-        dx = parseFloat(attrOr(prim, 'dx', '0')) || 0;
-        dy = parseFloat(attrOr(prim, 'dy', '0')) || 0;
+        chain.hasOffset = true;
+        chain.dx = parseFloat(attrOr(prim, 'dx', '0')) || 0;
+        chain.dy = parseFloat(attrOr(prim, 'dy', '0')) || 0;
       } else if (pname === 'feGaussianBlur') {
         hasBlur = true;
         var sd = String(attrOr(prim, 'stdDeviation', '0')).replace(/^[\s,]+|[\s,]+$/g, '').split(/[\s,]+/);
-        std = parseFloat(sd[0]) || 0;
+        chain.std = parseFloat(sd[0]) || 0;
+        lastStd = chain.std;
       } else if (pname === 'feComposite') {
         var op = attrOr(prim, 'operator', 'over');
-        if (op === 'out') hasCompositeOut = true;
-        if (op === 'arithmetic' && parseFloat(attrOr(prim, 'k2', '0')) === -1) hasInner = true;
+        if (op === 'out') chain.hasCompositeOut = true;
+        if (op === 'arithmetic' && parseFloat(attrOr(prim, 'k2', '0')) === -1) chain.inner = true;
       } else if (pname === 'feColorMatrix') {
         if (attrOr(prim, 'in', '') !== 'SourceAlpha') {
           var vals = parseColorMatrixValues(prim.attrs.values);
           if (vals) {
-            shadowColor = { r: vals[4], g: vals[9], b: vals[14] };
-            shadowOpacity = vals[18];
+            chain.color = { r: vals[4], g: vals[9], b: vals[14] };
+            chain.opacity = vals[18];
           }
         }
       } else if (pname === 'feMorphology') {
-        hasMorphology = true;
+        chain.morph = true;
       } else if (pname === 'feDropShadow') {
-        sawDropShadowPrim = {
-          dx: parseFloat(attrOr(prim, 'dx', '2')) || 0,
-          dy: parseFloat(attrOr(prim, 'dy', '2')) || 0,
-          std: parseFloat(attrOr(prim, 'stdDeviation', '2')) || 0
-        };
         var fc = colorMod.parse(attrOr(prim, 'flood-color', 'black'));
         var fo = parseFloat(attrOr(prim, 'flood-opacity', '1'));
-        if (fc && !fc.none) shadowColor = { r: fc.r, g: fc.g, b: fc.b };
-        if (!isNaN(fo)) shadowOpacity = fo * (fc ? fc.a : 1);
+        effects[effects.length] = {
+          type: 'dropShadow',
+          dx: parseFloat(attrOr(prim, 'dx', '2')) || 0,
+          dy: parseFloat(attrOr(prim, 'dy', '2')) || 0,
+          stdDeviation: parseFloat(attrOr(prim, 'stdDeviation', '2')) || 0,
+          color: fc && !fc.none ? { r: fc.r, g: fc.g, b: fc.b } : { r: 0, g: 0, b: 0 },
+          opacity: (isNaN(fo) ? 1 : fo) * (fc && fc.a !== undefined ? fc.a : 1)
+        };
+      } else if (pname === 'feBlend') {
+        flushChain();
       }
     }
+    flushChain();
 
-    if (sawDropShadowPrim) {
-      effects[effects.length] = {
-        type: 'dropShadow', dx: sawDropShadowPrim.dx, dy: sawDropShadowPrim.dy,
-        stdDeviation: sawDropShadowPrim.std, color: shadowColor, opacity: shadowOpacity
-      };
-    } else if (hasInner) {
+    if (innerCount > 0) {
       warnings[warnings.length] = 'inner shadow (filter #' + fid + ') not supported; skipped';
-    } else if (hasOffset || hasCompositeOut) {
-      effects[effects.length] = {
-        type: 'dropShadow', dx: dx, dy: dy, stdDeviation: std,
-        color: shadowColor, opacity: shadowOpacity
-      };
-      if (hasMorphology) {
-        warnings[warnings.length] = 'shadow spread (feMorphology, filter #' + fid + ') approximated without spread';
-      }
-    } else if (hasBlur) {
+    }
+    if (effects.length === 0 && innerCount === 0 && hasBlur) {
       // background blur renders as a plain blur warning; foreground blur converts
       if (/_b_|backgroundBlur/.test(fid) || filterHasBackgroundBlurResult(prims)) {
         warnings[warnings.length] = 'background blur (filter #' + fid + ') not supported; skipped';
       } else {
-        effects[effects.length] = { type: 'gaussianBlur', stdDeviation: std };
+        effects[effects.length] = { type: 'gaussianBlur', stdDeviation: lastStd };
       }
-    } else if (prims.length > 0) {
+    } else if (effects.length === 0 && innerCount === 0 && prims.length > 0) {
       warnings[warnings.length] = 'filter #' + fid + ' not recognized; skipped';
     }
     return { effects: effects, warnings: warnings };
@@ -1763,6 +1785,12 @@ SVGSPLIT.scene = (function () {
 
     var viewBoxBounds = { minX: 0, minY: 0, maxX: width, maxY: height };
 
+    // viewport in USER units (pre-rootMatrix): percentage lengths and
+    // userSpaceOnUse gradient defaults resolve against these, not comp pixels.
+    var userW = vb ? vb[2] : width;
+    var userH = vb ? vb[3] : height;
+    var userDiag = Math.sqrt((userW * userW + userH * userH) / 2);
+
     // Resolve a clip-path reference into baked contour sets.
     // Returns {contoursSets: [contours], unclipped: bool(viewBox no-op)} or null.
     function resolveClip(refId, ctm, warn) {
@@ -1777,7 +1805,11 @@ SVGSPLIT.scene = (function () {
       }
       var contours = [];
       var clipWarn = [];
-      (function walkClip(node, m) {
+      (function walkClip(node, m, depth) {
+        if (depth > 16) {
+          clipWarn[clipWarn.length] = 'clipPath #' + refId + ' nests <use> too deeply (cycle?); truncated';
+          return;
+        }
         for (var i = 0; i < node.children.length; i++) {
           var c = node.children[i];
           if (!isElement(c)) continue;
@@ -1792,11 +1824,11 @@ SVGSPLIT.scene = (function () {
             if (target) {
               var um = matrix.multiply(cm, matrix.translate(
                 parseFloat(attrOr(c, 'x', '0')) || 0, parseFloat(attrOr(c, 'y', '0')) || 0));
-              walkClip({ children: [target], attrs: {} }, um);
+              walkClip({ children: [target], attrs: {} }, um, depth + 1);
             }
             continue;
           } else if (name === 'g') {
-            walkClip(c, cm);
+            walkClip(c, cm, depth + 1);
             continue;
           } else {
             clipWarn[clipWarn.length] = 'unsupported element <' + name + '> in clipPath #' + refId;
@@ -1810,7 +1842,7 @@ SVGSPLIT.scene = (function () {
             clipWarn[clipWarn.length] = 'clip-rule="evenodd" in clipPath #' + refId + ' may merge differently in AE';
           }
         }
-      })(clipNode, ctm);
+      })(clipNode, matrix.multiply(ctm, matrix.parse(clipNode.attrs.transform)), 0);
       for (var cw = 0; cw < clipWarn.length; cw++) warn(clipWarn[cw]);
       if (contours.length === 0) {
         warn('clipPath #' + refId + ' has no usable geometry; clip ignored');
@@ -1836,7 +1868,7 @@ SVGSPLIT.scene = (function () {
         }
         var defName = localName(def);
         if (defName === 'linearGradient' || defName === 'radialGradient') {
-          return resolveGradient(def, defs, ctm, userBBox, warn, [width, height]);
+          return resolveGradient(def, defs, ctm, userBBox, warn, [userW, userH]);
         }
         if (defName === 'pattern') {
           warn('image/pattern fill #' + refId + ' not supported; using gray placeholder');
@@ -1885,13 +1917,17 @@ SVGSPLIT.scene = (function () {
           '> not supported; content imported unmasked');
       }
 
+      var ownEffects = [];
       var filterRef = urlRefId(node.attrs.filter || styleMod.parseInline(node.attrs.style).filter);
       if (filterRef !== null) {
         var filterNode = defs[filterRef];
         if (filterNode && localName(filterNode) === 'filter') {
           var decoded = decodeFilter(filterNode);
           for (var dw = 0; dw < decoded.warnings.length; dw++) sink.warn(decoded.warnings[dw]);
-          for (var de = 0; de < decoded.effects.length; de++) sink.effect(decoded.effects[de]);
+          for (var de = 0; de < decoded.effects.length; de++) {
+            sink.effect(decoded.effects[de]);
+            ownEffects[ownEffects.length] = decoded.effects[de];
+          }
         } else {
           sink.warn('filter #' + filterRef + ' not found; ignored');
         }
@@ -1902,7 +1938,10 @@ SVGSPLIT.scene = (function () {
 
       var childCtx = {
         m: m, style: computed, opacity: opacity, clips: clips,
-        name: node.attrs.id || ctx.name, depth: ctx.depth
+        name: node.attrs.id || ctx.name, depth: ctx.depth,
+        // effects/blend scoped to this subtree - consumed by leaf split mode
+        effects: ownEffects.length > 0 ? ctx.effects.concat(ownEffects) : ctx.effects,
+        blend: blend && blend !== 'normal' ? blend : ctx.blend
       };
 
       if (name === 'g' || name === 'svg' || name === 'a') {
@@ -1936,11 +1975,16 @@ SVGSPLIT.scene = (function () {
         var useCtx = {
           m: matrix.multiply(m, matrix.translate(ux, uy)),
           style: computed, opacity: opacity, clips: clips,
-          name: node.attrs.id || ctx.name, depth: ctx.depth + 1
+          name: node.attrs.id || ctx.name, depth: ctx.depth + 1,
+          effects: childCtx.effects, blend: childCtx.blend
         };
         collectItems(target, useCtx, sink);
         return;
       }
+
+      // hidden leaves render nothing (groups above still recurse because
+      // children may set visibility back to visible)
+      if (computed.visibility !== 'visible') return;
 
       if (name === 'text') {
         collectText(node, childCtx, computed, sink);
@@ -1954,12 +1998,10 @@ SVGSPLIT.scene = (function () {
         if (iw > 0 && ih > 0) {
           var rectAttrs = { x: attrOr(node, 'x', '0'), y: attrOr(node, 'y', '0'), width: String(iw), height: String(ih) };
           sink.item(makeItem(node, shapesMod.contoursFor('rect', rectAttrs), m, computed,
-            { type: 'placeholder' }, null, opacity, clips, ctx, sink.warn));
+            { type: 'placeholder' }, null, opacity, clips, ctx, sink.warn), childCtx);
         }
         return;
       }
-
-      if (computed.visibility !== 'visible') return;
 
       var contours = null;
       if (name === 'path') {
@@ -1974,7 +2016,7 @@ SVGSPLIT.scene = (function () {
           }
         }
       } else if (DRAWABLES[name]) {
-        contours = shapesMod.contoursFor(name, node.attrs);
+        contours = shapesMod.contoursFor(name, resolvePercentAttrs(node.attrs));
       } else {
         sink.warn('<' + name + '> not supported; skipped');
         return;
@@ -1984,7 +2026,38 @@ SVGSPLIT.scene = (function () {
       var userBBox = pathMod.bounds(contours);
       var fill = resolvePaint(computed.fill, computed, m, userBBox, sink.warn);
       var stroke = resolvePaint(computed.stroke, computed, m, userBBox, sink.warn);
-      sink.item(makeItem(node, contours, m, computed, fill, stroke, opacity, clips, ctx, sink.warn));
+      sink.item(makeItem(node, contours, m, computed, fill, stroke, opacity, clips, ctx, sink.warn), childCtx);
+    }
+
+    // Resolves percentage lengths on shape-primitive attributes against the
+    // user-unit viewport (parseFloat alone would read "50%" as 50 units).
+    var PCT_X = { x: 1, width: 1, cx: 1, rx: 1, x1: 1, x2: 1 };
+    var PCT_Y = { y: 1, height: 1, cy: 1, ry: 1, y1: 1, y2: 1 };
+    var PCT_KEYS = ['x', 'y', 'width', 'height', 'cx', 'cy', 'r', 'rx', 'ry', 'x1', 'y1', 'x2', 'y2'];
+    function resolvePercentAttrs(attrs) {
+      var needs = false;
+      var k;
+      for (k = 0; k < PCT_KEYS.length; k++) {
+        var v0 = attrs[PCT_KEYS[k]];
+        if (v0 !== undefined && String(v0).indexOf('%') !== -1) needs = true;
+      }
+      if (!needs) return attrs;
+      var out = {};
+      for (k = 0; k < PCT_KEYS.length; k++) {
+        var key = PCT_KEYS[k];
+        var v = attrs[key];
+        if (v === undefined) continue;
+        var s = String(v);
+        if (s.indexOf('%') !== -1) {
+          var f = parseFloat(s) / 100;
+          var basis = PCT_X[key] ? userW : PCT_Y[key] ? userH : userDiag;
+          out[key] = String(f * basis);
+        } else {
+          out[key] = v;
+        }
+      }
+      if (attrs.points !== undefined) out.points = attrs.points;
+      return out;
     }
 
     function clampOpacity(v) {
@@ -2087,7 +2160,7 @@ SVGSPLIT.scene = (function () {
         fontSize: styleMod.parseLength(computed['font-size'], 16) * fontScale,
         fontWeight: computed['font-weight'],
         fontStyle: computed['font-style'],
-        letterSpacing: styleMod.parseLength(computed['letter-spacing'], 0),
+        letterSpacing: styleMod.parseLength(computed['letter-spacing'], 0) * fontScale,
         color: { r: col.r, g: col.g, b: col.b },
         opacity: ctx.opacity * clampOpacity(computed['fill-opacity']) * col.a
       };
@@ -2144,7 +2217,6 @@ SVGSPLIT.scene = (function () {
           layer.bbox = boundsUnion(layer.bbox, bb);
         },
         text: function (run) {
-          layer.kind = 'text';
           layer.textRuns[layer.textRuns.length] = run;
         },
         effect: function (e) {
@@ -2165,7 +2237,10 @@ SVGSPLIT.scene = (function () {
 
     var candidates = topLevelCandidates(root);
     var rootStyle = styleMod.compute(root, null, sheet);
-    var baseCtx = { m: rootMatrix, style: rootStyle, opacity: 1, clips: [], name: null, depth: 0 };
+    var baseCtx = {
+      m: rootMatrix, style: rootStyle, opacity: 1, clips: [],
+      name: null, depth: 0, effects: [], blend: null
+    };
 
     if (splitMode === 'toplevel') {
       for (var ci = 0; ci < candidates.length; ci++) {
@@ -2184,14 +2259,15 @@ SVGSPLIT.scene = (function () {
     }
 
     function collectItemsLeafMode(node, ctx, baseName, counter) {
-      var pendingEffects = [];
-      var pendingBlend = [null];
+      // Effects and blend modes are read from the emitting context so they
+      // stay scoped to the filtered subtree instead of leaking onto later
+      // sibling leaves.
       var sink = {
-        item: function (item) {
+        item: function (item, itemCtx) {
           counter.n++;
           var acc = newLayerAccumulator(baseName + ' / ' + item.name + ' ' + counter.n);
-          acc.layer.effects = acc.layer.effects.concat(pendingEffects);
-          acc.layer.blendMode = pendingBlend[0];
+          acc.layer.effects = acc.layer.effects.concat(itemCtx && itemCtx.effects ? itemCtx.effects : []);
+          acc.layer.blendMode = itemCtx ? itemCtx.blend : null;
           acc.sink.item(item);
           finishLayer(acc.layer);
         },
@@ -2201,8 +2277,8 @@ SVGSPLIT.scene = (function () {
           acc.sink.text(run);
           finishLayer(acc.layer);
         },
-        effect: function (e) { pendingEffects[pendingEffects.length] = e; },
-        blend: function (mode) { pendingBlend[0] = mode; },
+        effect: function () {},
+        blend: function () {},
         warn: function (msg) { warnGlobal(msg); }
       };
       collectItems(node, ctx, sink);
@@ -2214,6 +2290,9 @@ SVGSPLIT.scene = (function () {
         for (var i = 0; i < layer.warnings.length; i++) warnGlobal(layer.warnings[i]);
         return;
       }
+      // 'text' only when there is nothing else; a mixed layer keeps its shape
+      // items and the builder additionally creates text layers for the runs.
+      layer.kind = layer.items.length === 0 ? 'text' : 'shape';
       if (layer.kind === 'shape' && !layer.bbox) {
         layer.bbox = { minX: 0, minY: 0, maxX: width, maxY: height };
       }
@@ -2269,13 +2348,18 @@ SVGSPLIT.aegrad = (function () {
     var out = [];
     for (var i = 0; i < n; i++) {
       var t = i / (n - 1);
+      // clamp outside the stop range (pad semantics), never extrapolate
       var lo = stops[0];
-      var hi = stops[stops.length - 1];
-      for (var j = 0; j < stops.length - 1; j++) {
-        if (stops[j].offset <= t && stops[j + 1].offset >= t) {
-          lo = stops[j];
-          hi = stops[j + 1];
-          break;
+      var hi = stops[0];
+      if (t >= stops[stops.length - 1].offset) {
+        lo = hi = stops[stops.length - 1];
+      } else if (t > stops[0].offset) {
+        for (var j = 0; j < stops.length - 1; j++) {
+          if (stops[j].offset <= t && stops[j + 1].offset >= t) {
+            lo = stops[j];
+            hi = stops[j + 1];
+            break;
+          }
         }
       }
       var span = hi.offset - lo.offset;
@@ -2531,6 +2615,8 @@ SVGSPLIT.ae = (function () {
   var JOINS = { miter: 1, round: 2, bevel: 3 };
   var FILL_RULE_NONZERO = 1;
   var FILL_RULE_EVENODD = 2;
+  var MERGE_MERGE = 1;
+  var MERGE_ADD = 2;
   var MERGE_INTERSECT = 4;
 
   // Empirical render-match factors (calibrated in E2E against Chrome):
@@ -2585,6 +2671,25 @@ SVGSPLIT.ae = (function () {
     }
     prop.property('ADBE Vector Shape').setValue(contourToShape(contour, offsetX, offsetY));
     return prop;
+  }
+
+  // Adds a set of contours as ONE merge-paths operand: a single path directly,
+  // or a nested group whose own Merge combines the contours into one compound
+  // path (innerMode: MERGE_MERGE preserves subpath/hole structure for shape
+  // content, MERGE_ADD unions overlapping clip children).
+  function addContourSet(contents, contours, innerMode, nameHint) {
+    if (contours.length === 1) {
+      addContour(contents, contours[0], 0, 0, nameHint);
+      return;
+    }
+    var group = contents.addProperty('ADBE Vector Group');
+    try { group.name = nameHint; } catch (eName) { /* keep default */ }
+    var inner = group.property('ADBE Vectors Group');
+    for (var i = 0; i < contours.length; i++) {
+      addContour(inner, contours[i], 0, 0, null);
+    }
+    var merge = inner.addProperty('ADBE Vector Filter - Merge');
+    merge.property('ADBE Vector Merge Type').setValue(innerMode);
   }
 
   function setDashes(strokeProp, dashes, dashOffset, warn) {
@@ -2646,18 +2751,22 @@ SVGSPLIT.ae = (function () {
       var groupContents = group.property('ADBE Vectors Group');
 
       var ci;
-      for (ci = 0; ci < item.contours.length; ci++) {
-        addContour(groupContents, item.contours[ci], 0, 0, null);
-      }
-      // Clip emulation: clip contours + Merge Paths (Intersect) consume
-      // everything above them in this group.
-      for (var cs = 0; cs < item.clips.length; cs++) {
-        var clipSet = item.clips[cs];
-        for (ci = 0; ci < clipSet.length; ci++) {
-          addContour(groupContents, clipSet[ci], 0, 0, 'Clip');
+      if (item.clips.length === 0) {
+        for (ci = 0; ci < item.contours.length; ci++) {
+          addContour(groupContents, item.contours[ci], 0, 0, null);
         }
-        var merge = groupContents.addProperty('ADBE Vector Filter - Merge');
-        merge.property('ADBE Vector Merge Type').setValue(MERGE_INTERSECT);
+      } else {
+        // Clip emulation. Merge Paths Intersect consumes ALL paths above it,
+        // so multi-contour operands must first be combined into ONE compound
+        // path each (in a nested group with its own Merge) - otherwise the
+        // item's own subpaths would be intersected with each other.
+        addContourSet(groupContents, item.contours, MERGE_MERGE, 'Shape');
+        for (var cs = 0; cs < item.clips.length; cs++) {
+          // clip children combine as a union per SVG clipping semantics
+          addContourSet(groupContents, item.clips[cs], MERGE_ADD, 'Clip');
+          var merge = groupContents.addProperty('ADBE Vector Filter - Merge');
+          merge.property('ADBE Vector Merge Type').setValue(MERGE_INTERSECT);
+        }
       }
 
       // Stroke first so it renders above the fill (SVG paint order).
@@ -2811,11 +2920,14 @@ SVGSPLIT.ae = (function () {
         var spec = scene.layers[i];
         if (opts.onProgress) opts.onProgress(i + 1, totalLayers, spec.name);
         var layer = null;
-        if (spec.kind === 'text') {
-          var textLayers = buildTextLayers(comp, spec, warn);
-          layer = textLayers.length > 0 ? textLayers[0] : null;
-        } else {
+        // A spec can carry both shape items and text runs (e.g. a Figma frame
+        // with a background shape and live text) - build both.
+        if (spec.items.length > 0) {
           layer = buildShapeLayer(comp, spec, opts, warn);
+        }
+        if (spec.textRuns.length > 0) {
+          var textLayers = buildTextLayers(comp, spec, warn);
+          if (!layer) layer = textLayers.length > 0 ? textLayers[0] : null;
         }
         if (layer) {
           if (spec.blendMode) {
