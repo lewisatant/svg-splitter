@@ -13,8 +13,8 @@ SVGSPLIT.ae = (function () {
 
   // Empirical render-match factors (calibrated in E2E against Chrome):
   // AE Drop Shadow "Softness" and Gaussian Blur "Blurriness" per SVG stdDeviation.
-  var SHADOW_SOFTNESS_PER_STD = 2.0;
-  var BLUR_PER_STD = 2.0;
+  var SHADOW_SOFTNESS_PER_STD = 3.0;
+  var BLUR_PER_STD = 3.0;
 
   function blendEnum(cssName) {
     var map = {
@@ -114,7 +114,10 @@ SVGSPLIT.ae = (function () {
       return [pt[0], pt[1]];
     }
 
-    for (var ii = 0; ii < spec.items.length; ii++) {
+    // addProperty appends to the BOTTOM of the Contents list and lower items
+    // render BEHIND - so add groups in reverse document order to keep SVG
+    // paint order (later elements in front).
+    for (var ii = spec.items.length - 1; ii >= 0; ii--) {
       var item = spec.items[ii];
       var group = contents.addProperty('ADBE Vector Group');
       try { group.name = item.name; } catch (eGname) { /* keep default */ }
@@ -142,7 +145,9 @@ SVGSPLIT.ae = (function () {
         var strokeIsGradient = strokePaint.type === 'gradient' && opts.gradients !== 'solid';
         if (strokeIsGradient) {
           strokeProp = groupContents.addProperty('ADBE Vector Graphic - G-Stroke');
-          if (!SVGSPLIT.aegrad.apply(comp, layer, strokeProp, strokePaint, toLayerSpace, warn)) {
+          var strokeResult = SVGSPLIT.aegrad.apply(comp, layer, strokeProp, strokePaint, toLayerSpace, warn);
+          strokeProp = strokeResult.prop;
+          if (!strokeResult.applied) {
             strokeIsGradient = false;
             strokeProp.remove();
           }
@@ -155,8 +160,12 @@ SVGSPLIT.ae = (function () {
         strokeProp.property('ADBE Vector Stroke Width').setValue(item.stroke.width);
         strokeProp.property('ADBE Vector Stroke Opacity').setValue(item.stroke.opacity * 100);
         strokeProp.property('ADBE Vector Stroke Line Cap').setValue(CAPS.hasOwnProperty(item.stroke.cap) ? CAPS[item.stroke.cap] : 1);
-        strokeProp.property('ADBE Vector Stroke Line Join').setValue(JOINS.hasOwnProperty(item.stroke.join) ? JOINS[item.stroke.join] : 1);
-        strokeProp.property('ADBE Vector Stroke Miter Limit').setValue(item.stroke.miterLimit);
+        var joinKind = JOINS.hasOwnProperty(item.stroke.join) ? item.stroke.join : 'miter';
+        strokeProp.property('ADBE Vector Stroke Line Join').setValue(JOINS[joinKind]);
+        // Miter Limit is hidden (unsettable) unless the join is Miter.
+        if (joinKind === 'miter') {
+          strokeProp.property('ADBE Vector Stroke Miter Limit').setValue(item.stroke.miterLimit);
+        }
         setDashes(strokeProp, item.stroke.dashes, item.stroke.dashOffset, warn);
       }
 
@@ -166,7 +175,9 @@ SVGSPLIT.ae = (function () {
         var fillIsGradient = fillPaint.type === 'gradient' && opts.gradients !== 'solid';
         if (fillIsGradient) {
           fillProp = groupContents.addProperty('ADBE Vector Graphic - G-Fill');
-          if (!SVGSPLIT.aegrad.apply(comp, layer, fillProp, fillPaint, toLayerSpace, warn)) {
+          var fillResult = SVGSPLIT.aegrad.apply(comp, layer, fillProp, fillPaint, toLayerSpace, warn);
+          fillProp = fillResult.prop;
+          if (!fillResult.applied) {
             fillIsGradient = false;
             fillProp.remove();
           }

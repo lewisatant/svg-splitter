@@ -20,7 +20,7 @@ const CORE_FILES = [
 ];
 
 const AE_FILES = [
-  'src/ae/grad-templates.jsx',
+  'src/ae/grad-canonical.jsx',
   'src/ae/gradients.jsx',
   'src/ae/builder.jsx',
   'src/ae/panel.jsx',
