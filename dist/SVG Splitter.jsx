@@ -1299,7 +1299,8 @@ SVGSPLIT.style = (function () {
     parseInline: parseInline,
     parseSheet: parseSheet,
     parseLength: parseLength,
-    parseDashArray: parseDashArray
+    parseDashArray: parseDashArray,
+    PROP_NAMES: PROP_NAMES
   };
 })();
 
@@ -2184,18 +2185,46 @@ SVGSPLIT.scene = (function () {
       return out;
     }
 
+    // True when the group carries nothing that affects rendering or
+    // inheritance (only an id is allowed) - anything else (transform, filter,
+    // mask, class, or ANY presentation attribute incl. visibility/display)
+    // makes it a real group that must not be flattened away.
+    var WRAPPER_BLOCKING_ATTRS = ['transform', 'filter', 'mask', 'style', 'class']
+      .concat(styleMod.PROP_NAMES);
+    function hasNoWrapperAttrs(gNode) {
+      var attrs = gNode.attrs;
+      for (var i = 0; i < WRAPPER_BLOCKING_ATTRS.length; i++) {
+        if (attrs[WRAPPER_BLOCKING_ATTRS[i]] !== undefined && attrs[WRAPPER_BLOCKING_ATTRS[i]] !== '') return false;
+      }
+      return true;
+    }
+
     function isNoopClipWrapper(gNode) {
       // A wrapper is a no-op when its ONLY effect is a viewBox-covering clip.
-      var attrs = gNode.attrs;
-      var keys = ['transform', 'opacity', 'filter', 'mask', 'style', 'fill', 'stroke'];
-      for (var i = 0; i < keys.length; i++) {
-        if (attrs[keys[i]] !== undefined && attrs[keys[i]] !== '') return false;
-      }
-      var clipRef = urlRefId(attrs['clip-path']);
+      if (!hasNoWrapperAttrs(gNode)) return false;
+      var clipRef = urlRefId(gNode.attrs['clip-path']);
       if (clipRef === null) return false;
       var silent = function () {};
       var clipContours = resolveClip(clipRef, rootMatrix, silent);
       return clipContours !== null && clipIsViewBoxNoop(clipContours);
+    }
+
+    // When the document's only renderable top-level element is a passthrough
+    // group (Figma wraps the exported frame in <g id="Frame Name"> when
+    // "Include id" is on), split on its children instead - otherwise the
+    // whole design becomes a single layer.
+    function unwrapSoloWrappers(candidates) {
+      var guard = 0;
+      while (candidates.length === 1 && guard++ < 16) {
+        var only = candidates[0];
+        if (localName(only) !== 'g' || !hasNoWrapperAttrs(only)) break;
+        var clipRef = urlRefId(only.attrs['clip-path']);
+        if (clipRef !== null && !isNoopClipWrapper(only)) break;
+        var inner = topLevelCandidates(only);
+        if (inner.length === 0) break;
+        candidates = inner;
+      }
+      return candidates;
     }
 
     // ----- build layers -----
@@ -2235,7 +2264,7 @@ SVGSPLIT.scene = (function () {
       return { layer: layer, sink: sink };
     }
 
-    var candidates = topLevelCandidates(root);
+    var candidates = unwrapSoloWrappers(topLevelCandidates(root));
     var rootStyle = styleMod.compute(root, null, sheet);
     var baseCtx = {
       m: rootMatrix, style: rootStyle, opacity: 1, clips: [],

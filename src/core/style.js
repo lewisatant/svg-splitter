@@ -197,6 +197,7 @@ SVGSPLIT.style = (function () {
     parseInline: parseInline,
     parseSheet: parseSheet,
     parseLength: parseLength,
-    parseDashArray: parseDashArray
+    parseDashArray: parseDashArray,
+    PROP_NAMES: PROP_NAMES
   };
 })();

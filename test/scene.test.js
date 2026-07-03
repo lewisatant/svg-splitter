@@ -99,16 +99,19 @@ test('clip attaches even when content bbox is fully inside the clip (only viewBo
 
 // ---------------------------------------------------------------- split modes
 
+// The sibling circle keeps #G from being unwrapped as a solo frame wrapper
+// (a lone top-level group is deliberately flattened - the Figma frame case).
 const SPLIT_DOC = svg(
   '<g id="G">' +
     '<rect id="r1" x="0" y="0" width="10" height="10" fill="#f00"/>' +
     '<rect id="r2" x="20" y="0" width="10" height="10" fill="#0f0"/>' +
-    '</g>'
+    '</g>' +
+    '<circle id="c1" cx="50" cy="50" r="5" fill="#00f"/>'
 );
 
 test('splitMode toplevel: one layer per top-level candidate, items merged', () => {
   const scene = build(SPLIT_DOC, { splitMode: 'toplevel' });
-  assert.strictEqual(scene.layers.length, 1);
+  assert.strictEqual(scene.layers.length, 2);
   assert.strictEqual(scene.layers[0].name, 'G');
   assert.strictEqual(scene.layers[0].items.length, 2);
   assert.strictEqual(scene.layers[0].items[0].name, 'r1');
@@ -117,11 +120,12 @@ test('splitMode toplevel: one layer per top-level candidate, items merged', () =
 
 test('splitMode leaf: every item becomes its own layer', () => {
   const scene = build(SPLIT_DOC, { splitMode: 'leaf' });
-  assert.strictEqual(scene.layers.length, 2);
+  assert.strictEqual(scene.layers.length, 3);
   assert.strictEqual(scene.layers[0].items.length, 1);
   assert.strictEqual(scene.layers[1].items.length, 1);
   assert.match(scene.layers[0].name, /r1/);
   assert.match(scene.layers[1].name, /r2/);
+  assert.match(scene.layers[2].name, /c1/);
 });
 
 // ---------------------------------------------------------------- CTM baking

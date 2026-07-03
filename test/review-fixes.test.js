@@ -54,15 +54,17 @@ test('leaf mode: group-level filter applies to every leaf inside the group', () 
 });
 
 test('mixed shape + text group keeps its shape items (kind stays shape)', () => {
-  const doc = svg(`<g id="card">
+  // sibling element keeps #card from being unwrapped as a solo frame wrapper
+  const doc = svg(`<rect id="bg" width="100" height="100" fill="#eee"/><g id="card">
     <rect width="50" height="50" fill="#f00"/>
     <text x="20" y="40" font-size="12" fill="#000"><tspan x="20" y="40">Hi</tspan></text>
   </g>`);
   const out = S.scene.build(doc, { splitMode: 'toplevel' });
-  assert.strictEqual(out.layers.length, 1);
-  assert.strictEqual(out.layers[0].kind, 'shape');
-  assert.strictEqual(out.layers[0].items.length, 1, 'rect survives');
-  assert.strictEqual(out.layers[0].textRuns.length, 1, 'text run captured');
+  assert.strictEqual(out.layers.length, 2);
+  const card = out.layers[1];
+  assert.strictEqual(card.kind, 'shape');
+  assert.strictEqual(card.items.length, 1, 'rect survives');
+  assert.strictEqual(card.textRuns.length, 1, 'text run captured');
 });
 
 test('pure text group still has kind text', () => {
@@ -189,4 +191,21 @@ test('resampleStops clamps outside the stop range instead of extrapolating', () 
     assert.ok(s.color.r >= 0.4 - 1e-9 && s.color.r <= 0.6 + 1e-9,
       `resampled color must stay in source range, got ${s.color.r}`);
   }
+});
+
+test('solo frame wrapper group (Figma Include-id export) is unwrapped for splitting', () => {
+  const doc = svg(`<g id="Slide 16:9 - 1">
+    <rect width="100" height="100" fill="#fff"/>
+    <g id="Title"><rect width="10" height="10" fill="#f00"/></g>
+    <g id="Body"><circle cx="50" cy="50" r="10" fill="#00f"/></g>
+  </g>`);
+  const out = S.scene.build(doc, { splitMode: 'toplevel' });
+  assert.strictEqual(out.layers.length, 3, 'children of the frame wrapper become layers');
+  assert.strictEqual(JSON.stringify(out.layers.map((l) => l.name).slice(1)), '["Title","Body"]');
+});
+
+test('a wrapper with a transform is NOT unwrapped', () => {
+  const doc = svg(`<g id="W" transform="translate(5 0)"><rect width="10" height="10" fill="#f00"/><rect x="20" width="10" height="10" fill="#00f"/></g>`);
+  const out = S.scene.build(doc, { splitMode: 'toplevel' });
+  assert.strictEqual(out.layers.length, 1, 'transformed group stays one layer');
 });
