@@ -195,6 +195,66 @@ test('splitMode nested: group opacity/blend attach to the group node, not the le
   assertClose(aFill.opacity, 1, 1e-9, 'leaf fill opacity unscaled by group');
 });
 
+test('splitMode nested: a rect-clipped frame becomes a frame node sized to its clip, content in frame-local space', () => {
+  const scene = build(
+    '<svg width="200" height="200" viewBox="0 0 200 200">' +
+      '<g id="Card" clip-path="url(#f)" transform="translate(40 30)">' +
+      '<rect id="bg" width="120" height="80" fill="#eee"/>' +
+      '<rect id="over" x="100" y="60" width="60" height="60" fill="#f00"/>' +
+      '</g>' +
+      '<circle id="sib" cx="10" cy="10" r="3" fill="#00f"/>' +
+      '<defs><clipPath id="f"><rect width="120" height="80"/></clipPath></defs>' +
+      '</svg>',
+    { splitMode: 'nested' }
+  );
+  const card = scene.tree[0];
+  assert.strictEqual(card.type, 'group');
+  assert.strictEqual(card.name, 'Card');
+  assert.ok(card.frame, 'frame set');
+  assert.strictEqual(card.frame.width, 120);
+  assert.strictEqual(card.frame.height, 80);
+  assertClose(card.frame.minX, 40, 1e-9, 'frame minX (world)');
+  assertClose(card.frame.minY, 30, 1e-9, 'frame minY (world)');
+  // Frame is NOT propagated as a per-child clip; the precomp bounds clip it.
+  assert.strictEqual(card.children[0].items[0].clips.length, 0);
+  // Child geometry is shifted into frame-local space: bg top-left at (0,0).
+  const bb = S.path.bounds(card.children[0].items[0].contours);
+  assertClose(bb.minX, 0, 1e-6, 'bg local minX');
+  assertClose(bb.minY, 0, 1e-6, 'bg local minY');
+  // The overflowing rect keeps its geometry (clipping happens via comp bounds,
+  // downstream in AE) but is now expressed relative to the frame origin.
+  const ob = S.path.bounds(card.children[1].items[0].contours);
+  assertClose(ob.minX, 100, 1e-6, 'over local minX');
+  assertClose(ob.minY, 60, 1e-6, 'over local minY');
+});
+
+test('splitMode nested: a plain group (no clip) stays a full-canvas node in world coords', () => {
+  const scene = build(SPLIT_DOC, { splitMode: 'nested' });
+  const g = scene.tree[0];
+  assert.strictEqual(g.name, 'G');
+  assert.strictEqual(g.frame, null);
+  // r1 keeps its world position (x=0) - no frame-local shift.
+  const bb = S.path.bounds(g.children[0].items[0].contours);
+  assertClose(bb.minX, 0, 1e-6, 'r1 world minX');
+});
+
+test('splitMode nested: a non-rect clip stays a per-child clip, not a frame', () => {
+  const scene = build(
+    '<svg width="100" height="100" viewBox="0 0 100 100">' +
+      '<g id="Masked" clip-path="url(#c)">' +
+      '<rect id="r" width="80" height="80" fill="#f00"/>' +
+      '</g>' +
+      '<circle id="sib" cx="90" cy="90" r="3" fill="#00f"/>' +
+      '<defs><clipPath id="c"><circle cx="40" cy="40" r="30"/></clipPath></defs>' +
+      '</svg>',
+    { splitMode: 'nested' }
+  );
+  const g = scene.tree[0];
+  assert.strictEqual(g.name, 'Masked');
+  assert.strictEqual(g.frame, null);
+  assert.strictEqual(g.children[0].items[0].clips.length, 1);
+});
+
 test('splitMode nested: no-op clip wrapper is inlined, not turned into a precomp', () => {
   const scene = build(
     '<svg width="100" height="100" viewBox="0 0 100 100">' +

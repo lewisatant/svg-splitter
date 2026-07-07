@@ -430,11 +430,15 @@ SVGSPLIT.ae = (function () {
   // Builds a nested-mode child list into `comp`, in document order. AE adds
   // each new layer at the TOP of the stack, so iterating first->last leaves the
   // last (front-most in SVG paint order) on top - matching the source.
-  function buildChildren(comp, children, scene, opts, warn, progress, total, counts) {
+  // parentShift is the world offset of the enclosing comp's content ([0,0] for
+  // the root and for full-canvas group precomps; the frame top-left for a frame
+  // precomp). It lets a child precomp position itself correctly regardless of
+  // whether its parent is world-space or frame-local.
+  function buildChildren(comp, children, scene, opts, warn, progress, total, counts, parentShift) {
     for (var i = 0; i < children.length; i++) {
       var child = children[i];
       if (child.type === 'group') {
-        buildGroupComp(comp, child, scene, opts, warn, progress, total, counts);
+        buildGroupComp(comp, child, scene, opts, warn, progress, total, counts, parentShift);
       } else {
         progress.n++;
         if (opts.onProgress) opts.onProgress(progress.n, total, child.name);
@@ -443,21 +447,36 @@ SVGSPLIT.ae = (function () {
     }
   }
 
-  // Turns a Figma group node into a precomposition (same size as the root comp,
-  // so world-space geometry lands pixel-exact when the precomp layer is centered
-  // in its parent) and adds it as a layer carrying the group's blend/opacity/fx.
-  function buildGroupComp(parentComp, groupNode, scene, opts, warn, progress, total, counts) {
+  // Turns a group node into a precomposition and adds it as a layer carrying the
+  // group's blend/opacity/effects. A plain group is a full-canvas precomp in
+  // world coordinates; a frame (groupNode.frame set) is sized to the frame rect
+  // and clips its content to its own bounds. Either way the precomp is placed so
+  // its content lands pixel-exact: anchor at the precomp centre, position =
+  // centre + this comp's world shift - the parent's world shift.
+  function buildGroupComp(parentComp, groupNode, scene, opts, warn, progress, total, counts, parentShift) {
+    var fr = groupNode.frame;
+    var w = fr ? Math.max(4, Math.round(fr.width)) : Math.max(scene.width, 4);
+    var h = fr ? Math.max(4, Math.round(fr.height)) : Math.max(scene.height, 4);
+    var shiftX = fr ? fr.minX : 0;
+    var shiftY = fr ? fr.minY : 0;
+
     var pre = app.project.items.addComp(
       uniqueName(groupNode.name, counts),
-      Math.max(scene.width, 4),
-      Math.max(scene.height, 4),
+      w,
+      h,
       1.0,
       opts.duration || 10,
       opts.frameRate || 30
     );
-    buildChildren(pre, groupNode.children, scene, opts, warn, progress, total, counts);
+    buildChildren(pre, groupNode.children, scene, opts, warn, progress, total, counts, [shiftX, shiftY]);
 
     var layer = parentComp.layers.add(pre);
+    var xform = layer.property('ADBE Transform Group');
+    xform.property('ADBE Anchor Point').setValue([w / 2, h / 2]);
+    xform.property('ADBE Position').setValue([
+      w / 2 + shiftX - parentShift[0],
+      h / 2 + shiftY - parentShift[1]
+    ]);
     if (groupNode.blendMode) {
       var be = blendEnum(groupNode.blendMode);
       if (be !== null) layer.blendingMode = be;
@@ -511,7 +530,7 @@ SVGSPLIT.ae = (function () {
 
       if (scene.tree) {
         // nested mode: build the group hierarchy as precomps into the root comp
-        buildChildren(comp, scene.tree, scene, opts, warn, { n: 0 }, totalLayers, {});
+        buildChildren(comp, scene.tree, scene, opts, warn, { n: 0 }, totalLayers, {}, [0, 0]);
       } else {
         for (var i = 0; i < scene.layers.length; i++) {
           var spec = scene.layers[i];
