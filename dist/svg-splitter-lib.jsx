@@ -2860,6 +2860,127 @@ SVGSPLIT.ae = (function () {
     return layer;
   }
 
+  // ----- font resolution -----
+  // AE's TextDocument.font wants a PostScript name (e.g. "Roboto-Bold"), not a
+  // CSS family ("Roboto"). Assigning a bad name is silently ignored by AE, so we
+  // resolve family + weight + style against the installed font list ourselves.
+
+  // Map a style-name token stream (e.g. "SemiBold Italic") to a numeric weight.
+  // Ordered most-specific-first because we substring-match: "extrabold" must be
+  // tested before "bold", "ultralight" before "light".
+  var WEIGHT_KEYWORDS = [
+    ['thin', 100], ['hairline', 100],
+    ['extralight', 200], ['ultralight', 200],
+    ['semibold', 600], ['demibold', 600],
+    ['extrabold', 800], ['ultrabold', 800],
+    ['light', 300],
+    ['medium', 500],
+    ['black', 900], ['heavy', 900],
+    ['bold', 700],
+    ['book', 400], ['roman', 400], ['regular', 400], ['normal', 400]
+  ];
+
+  function normName(s) {
+    return String(s).toLowerCase().replace(/[\s\-_]+/g, '');
+  }
+
+  function styleWeight(styleName) {
+    var s = normName(styleName);
+    for (var i = 0; i < WEIGHT_KEYWORDS.length; i++) {
+      if (s.indexOf(WEIGHT_KEYWORDS[i][0]) !== -1) return WEIGHT_KEYWORDS[i][1];
+    }
+    return 400;
+  }
+
+  function styleIsItalic(styleName) {
+    var s = normName(styleName);
+    return s.indexOf('italic') !== -1 || s.indexOf('oblique') !== -1;
+  }
+
+  function desiredWeight(cssWeight) {
+    var w = String(cssWeight);
+    if (w === 'bold') return 700;
+    if (w === 'normal' || w === '') return 400;
+    if (w === 'bolder') return 700;
+    if (w === 'lighter') return 300;
+    var n = parseInt(w, 10);
+    return isNaN(n) ? 400 : n;
+  }
+
+  // Lazily-built cache of installed fonts, grouped by normalized family name.
+  var _fontIndex = null;
+  function fontIndex() {
+    if (_fontIndex !== null) return _fontIndex;
+    _fontIndex = { byFamily: {}, ok: false };
+    try {
+      if (app.fonts && app.fonts.allFonts) {
+        var all = app.fonts.allFonts;
+        for (var i = 0; i < all.length; i++) {
+          var f = all[i];
+          var fam = normName(f.familyName || '');
+          if (!_fontIndex.byFamily[fam]) _fontIndex.byFamily[fam] = [];
+          _fontIndex.byFamily[fam].push(f);
+          // also index native family name if it differs
+          var nfam = normName(f.nativeFamilyName || '');
+          if (nfam && nfam !== fam) {
+            if (!_fontIndex.byFamily[nfam]) _fontIndex.byFamily[nfam] = [];
+            _fontIndex.byFamily[nfam].push(f);
+          }
+        }
+        _fontIndex.ok = true;
+      }
+    } catch (eIdx) { /* app.fonts unavailable (older AE) */ }
+    return _fontIndex;
+  }
+
+  // Returns { font: FontObject, postScriptName: str } or null when the family
+  // isn't installed. On a family match but imperfect weight/style, returns the
+  // closest variant.
+  function resolveFont(family, cssWeight, cssStyle) {
+    var idx = fontIndex();
+    if (!idx.ok) return null;
+
+    var wantWeight = desiredWeight(cssWeight);
+    var wantItalic = String(cssStyle).indexOf('italic') !== -1 ||
+                     String(cssStyle).indexOf('oblique') !== -1;
+
+    // font-family may be a fallback list ("Roboto, Arial, sans-serif"); try each
+    // in order and use the first family that is actually installed.
+    var families = String(family).split(',');
+    for (var f = 0; f < families.length; f++) {
+      var candidates = idx.byFamily[normName(families[f])];
+      if (!candidates || candidates.length === 0) continue;
+      var best = null;
+      var bestScore = Infinity;
+      for (var i = 0; i < candidates.length; i++) {
+        var cand = candidates[i];
+        var score = Math.abs(styleWeight(cand.styleName) - wantWeight);
+        if (styleIsItalic(cand.styleName) !== wantItalic) score += 10000;
+        if (score < bestScore) { bestScore = score; best = cand; }
+      }
+      if (best) return { font: best, postScriptName: best.postScriptName };
+    }
+    return null;
+  }
+
+  function applyFont(doc, run, warn) {
+    if (!run.fontFamily) return;
+    var resolved = resolveFont(run.fontFamily, run.fontWeight, run.fontStyle);
+    if (resolved) {
+      try {
+        if (typeof doc.setFont === 'function') {
+          doc.setFont(resolved.font);
+        } else {
+          doc.font = resolved.postScriptName;
+        }
+        return;
+      } catch (eSet) { /* fall through to warning */ }
+    }
+    warn('font "' + run.fontFamily + '" (' + run.fontWeight +
+         (String(run.fontStyle).indexOf('italic') !== -1 ? ' italic' : '') +
+         ') not found in AE; using default');
+  }
+
   function buildTextLayers(comp, spec, warn) {
     var created = [];
     for (var i = 0; i < spec.textRuns.length; i++) {
@@ -2870,13 +2991,7 @@ SVGSPLIT.ae = (function () {
       var doc = textProp.value;
       doc.fontSize = run.fontSize;
       doc.fillColor = [run.color.r, run.color.g, run.color.b];
-      if (run.fontFamily) {
-        try {
-          doc.font = run.fontFamily;
-        } catch (eFont) {
-          warn('font "' + run.fontFamily + '" not found; using default');
-        }
-      }
+      applyFont(doc, run, warn);
       try {
         doc.tracking = run.letterSpacing && run.fontSize > 0 ? run.letterSpacing / run.fontSize * 1000 : 0;
       } catch (eTrack) { /* older AE */ }
