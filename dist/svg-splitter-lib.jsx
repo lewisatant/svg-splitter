@@ -3248,15 +3248,11 @@ SVGSPLIT.ae = (function () {
   // Builds a nested-mode child list into `comp`, in document order. AE adds
   // each new layer at the TOP of the stack, so iterating first->last leaves the
   // last (front-most in SVG paint order) on top - matching the source.
-  // parentShift is the world offset of the enclosing comp's content ([0,0] for
-  // the root and for full-canvas group precomps; the frame top-left for a frame
-  // precomp). It lets a child precomp position itself correctly regardless of
-  // whether its parent is world-space or frame-local.
-  function buildChildren(comp, children, scene, opts, warn, progress, total, counts, parentShift) {
+  function buildChildren(comp, children, scene, opts, warn, progress, total, counts) {
     for (var i = 0; i < children.length; i++) {
       var child = children[i];
       if (child.type === 'group') {
-        buildGroupComp(comp, child, scene, opts, warn, progress, total, counts, parentShift);
+        buildGroupComp(comp, child, scene, opts, warn, progress, total, counts);
       } else {
         progress.n++;
         if (opts.onProgress) opts.onProgress(progress.n, total, child.name);
@@ -3270,8 +3266,10 @@ SVGSPLIT.ae = (function () {
   // world coordinates; a frame (groupNode.frame set) is sized to the frame rect
   // and clips its content to its own bounds. Either way the precomp is placed so
   // its content lands pixel-exact: anchor at the precomp centre, position =
-  // centre + this comp's world shift - the parent's world shift.
-  function buildGroupComp(parentComp, groupNode, scene, opts, warn, progress, total, counts, parentShift) {
+  // centre + this comp's own world shift. scene.js's coordinate fold already
+  // re-bases a groupNode's children (and any nested frame's minX/minY) to this
+  // precomp's own (0,0), so children need no further shift.
+  function buildGroupComp(parentComp, groupNode, scene, opts, warn, progress, total, counts) {
     var fr = groupNode.frame;
     var w = fr ? Math.max(4, Math.round(fr.width)) : Math.max(scene.width, 4);
     var h = fr ? Math.max(4, Math.round(fr.height)) : Math.max(scene.height, 4);
@@ -3286,15 +3284,12 @@ SVGSPLIT.ae = (function () {
       opts.duration || 10,
       opts.frameRate || 30
     );
-    buildChildren(pre, groupNode.children, scene, opts, warn, progress, total, counts, [shiftX, shiftY]);
+    buildChildren(pre, groupNode.children, scene, opts, warn, progress, total, counts);
 
     var layer = parentComp.layers.add(pre);
     var xform = layer.property('ADBE Transform Group');
     xform.property('ADBE Anchor Point').setValue([w / 2, h / 2]);
-    xform.property('ADBE Position').setValue([
-      w / 2 + shiftX - parentShift[0],
-      h / 2 + shiftY - parentShift[1]
-    ]);
+    xform.property('ADBE Position').setValue([w / 2 + shiftX, h / 2 + shiftY]);
     if (groupNode.blendMode) {
       var be = blendEnum(groupNode.blendMode);
       if (be !== null) layer.blendingMode = be;
@@ -3348,7 +3343,7 @@ SVGSPLIT.ae = (function () {
 
       if (scene.tree) {
         // nested mode: build the group hierarchy as precomps into the root comp
-        buildChildren(comp, scene.tree, scene, opts, warn, { n: 0 }, totalLayers, {}, [0, 0]);
+        buildChildren(comp, scene.tree, scene, opts, warn, { n: 0 }, totalLayers, {});
       } else {
         for (var i = 0; i < scene.layers.length; i++) {
           var spec = scene.layers[i];
