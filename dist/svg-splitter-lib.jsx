@@ -1312,8 +1312,17 @@ SVGSPLIT.style = (function () {
 // SVGSPLIT.scene.build(svgText, opts) -> {
 //   width, height,
 //   layers: [layerSpec],      // document order (first = bottom in AE)
+//   tree:   [node]|null,      // set only in 'nested' split mode (see below)
 //   warnings: [string]
 // }
+//
+// In 'nested' split mode the builder additionally returns `tree`: the root
+// comp's children in document order, where each Figma group (<g>) becomes a
+// groupNode and each drawable/text a layerSpec. `layers` still holds the flat
+// list of every leaf layer (used for counts/progress). The AE builder turns
+// each groupNode into a precomposition.
+//   groupNode: { type:'group', name, children:[node], effects:[effect],
+//                blendMode: string|null, opacity: number(0..1), warnings:[string] }
 //
 // layerSpec: {
 //   name, kind: 'shape'|'text',
@@ -1720,7 +1729,9 @@ SVGSPLIT.scene = (function () {
 
   function build(svgText, opts) {
     opts = opts || {};
-    var splitMode = opts.splitMode === 'leaf' ? 'leaf' : 'toplevel';
+    var splitMode = 'toplevel';
+    if (opts.splitMode === 'leaf') splitMode = 'leaf';
+    else if (opts.splitMode === 'nested') splitMode = 'nested';
     var globalWarnings = [];
 
     function warnGlobal(msg) {
@@ -2271,6 +2282,8 @@ SVGSPLIT.scene = (function () {
       name: null, depth: 0, effects: [], blend: null
     };
 
+    var tree = null;
+
     if (splitMode === 'toplevel') {
       for (var ci = 0; ci < candidates.length; ci++) {
         var cand = candidates[ci];
@@ -2278,13 +2291,137 @@ SVGSPLIT.scene = (function () {
         collectItems(cand, baseCtx, acc.sink);
         finishLayer(acc.layer);
       }
-    } else {
+    } else if (splitMode === 'leaf') {
       // leaf mode: every produced item/text run becomes its own layer
       for (var li = 0; li < candidates.length; li++) {
         var leafCand = candidates[li];
         var counter = { n: 0 };
         collectItemsLeafMode(leafCand, baseCtx, leafCand.attrs.id || localName(leafCand) + ' ' + (li + 1), counter);
       }
+    } else {
+      // nested mode: preserve the Figma group hierarchy as a tree. Each <g>
+      // becomes a groupNode (a precomp downstream); each drawable/text becomes
+      // its own layerSpec. Group opacity/blend/effects live on the groupNode.
+      tree = [];
+      var groupCtx = { m: baseCtx.m, style: baseCtx.style, clips: baseCtx.clips };
+      for (var gi = 0; gi < candidates.length; gi++) {
+        buildNestedNode(candidates[gi], groupCtx, tree);
+      }
+    }
+
+    // Build 0+ nodes from an element into `outChildren`, preserving order.
+    function buildNestedNode(node, gctx, outChildren) {
+      if (!isElement(node)) return;
+      var name = localName(node);
+      if (NON_RENDERED[name]) return;
+
+      if (name === 'g' || name === 'svg' || name === 'a') {
+        // A no-op clip wrapper contributes nothing; inline its children so it
+        // doesn't produce a redundant precomp.
+        if (name === 'g' && isNoopClipWrapper(node)) {
+          for (var k = 0; k < node.children.length; k++) {
+            buildNestedNode(node.children[k], gctx, outChildren);
+          }
+          return;
+        }
+        var g = makeGroupNode(node, gctx, name);
+        if (g) outChildren[outChildren.length] = g;
+        return;
+      }
+
+      // Leaf element: reuse collectItems (handles use/image/text/drawables plus
+      // the element's own transform/clip/filter/opacity) and emit one layer per
+      // produced item/run, in place.
+      collectLeafLayers(node, gctx, outChildren);
+    }
+
+    function makeGroupNode(node, gctx, name) {
+      var computed = styleMod.compute(node, gctx.style, sheet);
+      if (computed.display === 'none') return null;
+
+      var m = matrix.multiply(gctx.m, matrix.parse(node.attrs.transform));
+
+      var clips = gctx.clips;
+      var clipRef = urlRefId(node.attrs['clip-path'] || styleMod.parseInline(node.attrs.style)['clip-path']);
+      if (clipRef !== null) {
+        var clipContours = resolveClip(clipRef, m, warnGlobal);
+        if (clipContours && !clipIsViewBoxNoop(clipContours)) clips = clips.concat([clipContours]);
+      }
+
+      if (node.attrs.mask !== undefined || styleMod.parseInline(node.attrs.style).mask) {
+        warnGlobal('mask on group <' + name + (node.attrs.id ? ' id="' + node.attrs.id + '"' : '') +
+          '> not supported; content imported unmasked');
+      }
+      if (name === 'svg' && node !== root) {
+        warnGlobal('nested <svg> treated as group/precomp (inner viewBox ignored)');
+      }
+
+      var ownEffects = [];
+      var filterRef = urlRefId(node.attrs.filter || styleMod.parseInline(node.attrs.style).filter);
+      if (filterRef !== null) {
+        var filterNode = defs[filterRef];
+        if (filterNode && localName(filterNode) === 'filter') {
+          var decoded = decodeFilter(filterNode);
+          for (var dw = 0; dw < decoded.warnings.length; dw++) warnGlobal(decoded.warnings[dw]);
+          ownEffects = decoded.effects;
+        } else {
+          warnGlobal('filter #' + filterRef + ' not found; ignored');
+        }
+      }
+
+      var blend = computed['mix-blend-mode'];
+      var groupNode = {
+        type: 'group',
+        name: node.attrs.id || name || 'Group',
+        children: [],
+        effects: ownEffects,
+        blendMode: blend && blend !== 'normal' ? blend : null,
+        opacity: clampOpacity(computed.opacity),
+        warnings: []
+      };
+
+      // Children inherit geometry/clips but NOT opacity/blend/effects: those are
+      // realized on the precomp layer, so the leaves must not re-apply them.
+      var childCtx = { m: m, style: computed, clips: clips };
+      for (var i = 0; i < node.children.length; i++) {
+        buildNestedNode(node.children[i], childCtx, groupNode.children);
+      }
+      if (groupNode.children.length === 0) return null;
+      return groupNode;
+    }
+
+    // A leaf's own opacity/blend/effects still belong to it, so seed a fresh
+    // per-leaf context (opacity 1, no inherited effects/blend) and let
+    // collectItems read the element's own presentation attributes.
+    function collectLeafLayers(node, gctx, outChildren) {
+      var leafCtx = {
+        m: gctx.m, style: gctx.style, opacity: 1, clips: gctx.clips,
+        name: null, depth: 0, effects: [], blend: null
+      };
+      var sink = {
+        item: function (item, itemCtx) {
+          var acc = newLayerAccumulator(item.name);
+          acc.layer.effects = itemCtx && itemCtx.effects ? itemCtx.effects.slice() : [];
+          acc.layer.blendMode = itemCtx ? itemCtx.blend : null;
+          acc.sink.item(item);
+          finishLayer(acc.layer, outChildren);
+        },
+        text: function (run) {
+          var acc = newLayerAccumulator(textLayerName(run.text));
+          acc.sink.text(run);
+          finishLayer(acc.layer, outChildren);
+        },
+        effect: function () {},
+        blend: function () {},
+        warn: function (msg) { warnGlobal(msg); }
+      };
+      collectItems(node, leafCtx, sink);
+    }
+
+    function textLayerName(text) {
+      var t = String(text || '').replace(/\s+/g, ' ').replace(/^ | $/g, '');
+      if (t.length === 0) return 'Text';
+      return t.length > 32 ? t.substring(0, 32) : t;
     }
 
     function collectItemsLeafMode(node, ctx, baseName, counter) {
@@ -2313,7 +2450,10 @@ SVGSPLIT.scene = (function () {
       collectItems(node, ctx, sink);
     }
 
-    function finishLayer(layer) {
+    // Registers a finished layer in the flat `layers` list (used for counts and
+    // for the flat split modes). When `target` is given (nested mode), the layer
+    // is ALSO appended there so it keeps its place in the group's child order.
+    function finishLayer(layer, target) {
       var hasContent = layer.items.length > 0 || layer.textRuns.length > 0;
       if (!hasContent) {
         for (var i = 0; i < layer.warnings.length; i++) warnGlobal(layer.warnings[i]);
@@ -2326,12 +2466,14 @@ SVGSPLIT.scene = (function () {
         layer.bbox = { minX: 0, minY: 0, maxX: width, maxY: height };
       }
       layers[layers.length] = layer;
+      if (target) target[target.length] = layer;
     }
 
     return {
       width: Math.ceil(width),
       height: Math.ceil(height),
       layers: layers,
+      tree: tree,
       warnings: globalWarnings
     };
   }
@@ -3023,6 +3165,90 @@ SVGSPLIT.ae = (function () {
     }
   }
 
+  // Builds one shape/text layer from a leaf layer spec and applies its own
+  // blend mode, effects, and per-layer warnings. Returns the created layer.
+  function buildOneLayer(comp, spec, opts, warn) {
+    var layer = null;
+    // A spec can carry both shape items and text runs (e.g. a Figma frame with
+    // a background shape and live text) - build both.
+    if (spec.items.length > 0) {
+      layer = buildShapeLayer(comp, spec, opts, warn);
+    }
+    if (spec.textRuns.length > 0) {
+      var textLayers = buildTextLayers(comp, spec, warn);
+      if (!layer) layer = textLayers.length > 0 ? textLayers[0] : null;
+    }
+    if (layer) {
+      if (spec.blendMode) {
+        var be = blendEnum(spec.blendMode);
+        if (be !== null) layer.blendingMode = be;
+        else warn('blend mode "' + spec.blendMode + '" not mapped; left normal');
+      }
+      addEffects(layer, spec, warn);
+    }
+    for (var wi = 0; wi < spec.warnings.length; wi++) {
+      warn('[' + spec.name + '] ' + spec.warnings[wi]);
+    }
+    return layer;
+  }
+
+  // Keeps precomp names unique in the project panel so repeated Figma group
+  // names ("Group", "Icon") don't all collapse to one confusing entry.
+  function uniqueName(base, counts) {
+    base = base || 'Group';
+    if (!counts.hasOwnProperty(base)) {
+      counts[base] = 1;
+      return base;
+    }
+    counts[base]++;
+    return base + ' ' + counts[base];
+  }
+
+  // Builds a nested-mode child list into `comp`, in document order. AE adds
+  // each new layer at the TOP of the stack, so iterating first->last leaves the
+  // last (front-most in SVG paint order) on top - matching the source.
+  function buildChildren(comp, children, scene, opts, warn, progress, total, counts) {
+    for (var i = 0; i < children.length; i++) {
+      var child = children[i];
+      if (child.type === 'group') {
+        buildGroupComp(comp, child, scene, opts, warn, progress, total, counts);
+      } else {
+        progress.n++;
+        if (opts.onProgress) opts.onProgress(progress.n, total, child.name);
+        buildOneLayer(comp, child, opts, warn);
+      }
+    }
+  }
+
+  // Turns a Figma group node into a precomposition (same size as the root comp,
+  // so world-space geometry lands pixel-exact when the precomp layer is centered
+  // in its parent) and adds it as a layer carrying the group's blend/opacity/fx.
+  function buildGroupComp(parentComp, groupNode, scene, opts, warn, progress, total, counts) {
+    var pre = app.project.items.addComp(
+      uniqueName(groupNode.name, counts),
+      Math.max(scene.width, 4),
+      Math.max(scene.height, 4),
+      1.0,
+      opts.duration || 10,
+      opts.frameRate || 30
+    );
+    buildChildren(pre, groupNode.children, scene, opts, warn, progress, total, counts);
+
+    var layer = parentComp.layers.add(pre);
+    if (groupNode.blendMode) {
+      var be = blendEnum(groupNode.blendMode);
+      if (be !== null) layer.blendingMode = be;
+      else warn('blend mode "' + groupNode.blendMode + '" on group "' + groupNode.name + '" not mapped; left normal');
+    }
+    if (groupNode.opacity !== undefined && groupNode.opacity < 1) {
+      layer.property('ADBE Transform Group').property('ADBE Opacity').setValue(groupNode.opacity * 100);
+    }
+    if (groupNode.effects && groupNode.effects.length > 0) {
+      addEffects(layer, { effects: groupNode.effects }, warn);
+    }
+    return layer;
+  }
+
   // scene: result of SVGSPLIT.scene.build
   // opts: { newComp: bool, compName: str, duration: sec, frameRate: fps,
   //         gradients: 'ffx'|'solid', onProgress: fn(i,total,name)|null }
@@ -3060,29 +3286,14 @@ SVGSPLIT.ae = (function () {
         );
       }
 
-      for (var i = 0; i < scene.layers.length; i++) {
-        var spec = scene.layers[i];
-        if (opts.onProgress) opts.onProgress(i + 1, totalLayers, spec.name);
-        var layer = null;
-        // A spec can carry both shape items and text runs (e.g. a Figma frame
-        // with a background shape and live text) - build both.
-        if (spec.items.length > 0) {
-          layer = buildShapeLayer(comp, spec, opts, warn);
-        }
-        if (spec.textRuns.length > 0) {
-          var textLayers = buildTextLayers(comp, spec, warn);
-          if (!layer) layer = textLayers.length > 0 ? textLayers[0] : null;
-        }
-        if (layer) {
-          if (spec.blendMode) {
-            var be = blendEnum(spec.blendMode);
-            if (be !== null) layer.blendingMode = be;
-            else warn('blend mode "' + spec.blendMode + '" not mapped; left normal');
-          }
-          addEffects(layer, spec, warn);
-        }
-        for (var wi = 0; wi < spec.warnings.length; wi++) {
-          warnings[warnings.length] = '[' + spec.name + '] ' + spec.warnings[wi];
+      if (scene.tree) {
+        // nested mode: build the group hierarchy as precomps into the root comp
+        buildChildren(comp, scene.tree, scene, opts, warn, { n: 0 }, totalLayers, {});
+      } else {
+        for (var i = 0; i < scene.layers.length; i++) {
+          var spec = scene.layers[i];
+          if (opts.onProgress) opts.onProgress(i + 1, totalLayers, spec.name);
+          buildOneLayer(comp, spec, opts, warn);
         }
       }
     } finally {
@@ -3093,6 +3304,27 @@ SVGSPLIT.ae = (function () {
       warnings[warnings.length] = scene.warnings[gw];
     }
     return { comp: comp, layerCount: totalLayers, warnings: warnings };
+  }
+
+  // Capability probe: can scripts write files? "Full gradients" writes a temp
+  // .ffx preset (src/ae/gradients.jsx), which AE gates behind Preferences >
+  // Scripting & Expressions > "Allow Scripts to Write Files and Access Network".
+  // A real temp write is version-proof and predicts the exact operation the
+  // gradient path needs, unlike reading a pref key that can change across AE
+  // versions. Returns true if a tiny temp file can be written (and removed).
+  function canWriteFiles() {
+    try {
+      var f = new File(Folder.temp.fsName + '/svg-splitter-probe.tmp');
+      f.encoding = 'UTF-8';
+      if (!f.open('w')) return false;
+      f.write('ok');
+      f.close();
+      var ok = f.exists;
+      try { f.remove(); } catch (eRm) {}
+      return ok;
+    } catch (e) {
+      return false;
+    }
   }
 
   // Reads an SVG from disk and imports it. Entry point shared by the panel
@@ -3112,7 +3344,7 @@ SVGSPLIT.ae = (function () {
     return buildComp(scene, opts);
   }
 
-  return { buildComp: buildComp, importFile: importFile };
+  return { buildComp: buildComp, importFile: importFile, canWriteFiles: canWriteFiles };
 })();
 
 // ---- src/ae/panel.jsx ----
@@ -3122,9 +3354,31 @@ SVGSPLIT.ae = (function () {
 var SVGSPLIT = SVGSPLIT || {};
 
 SVGSPLIT.ui = (function () {
+  var PREFS = 'SVGSplitter';
+
   function shortenPath(p, maxLen) {
     if (p.length <= maxLen) return p;
     return '...' + p.substring(p.length - maxLen + 3);
+  }
+
+  // Persisted settings (app.settings stores strings). Best-effort: any failure
+  // falls back to the supplied default rather than breaking the panel.
+  function loadPref(key, dflt) {
+    try {
+      if (app.settings.haveSetting(PREFS, key)) return app.settings.getSetting(PREFS, key);
+    } catch (e) {}
+    return dflt;
+  }
+  function savePref(key, val) {
+    try { app.settings.saveSetting(PREFS, key, String(val)); } catch (e) {}
+  }
+  function loadBool(key, dflt) {
+    return loadPref(key, dflt ? '1' : '0') === '1';
+  }
+  function parseNumOr(text, dflt) {
+    var n = parseFloat(text);
+    if (isNaN(n) || n <= 0) return dflt;
+    return n;
   }
 
   function run(thisObj) {
@@ -3137,50 +3391,138 @@ SVGSPLIT.ui = (function () {
     pal.margins = 10;
 
     var selectedFile = null;
+    var logLines = [];
 
+    // --- File picker -------------------------------------------------------
     var fileGroup = pal.add('group');
     fileGroup.orientation = 'row';
     fileGroup.alignChildren = ['left', 'center'];
     var browseBtn = fileGroup.add('button', undefined, 'Choose SVG…');
+    browseBtn.helpTip = 'Pick an SVG exported from Figma.';
     var fileLabel = fileGroup.add('statictext', undefined, 'no file selected', { truncate: 'middle' });
     fileLabel.alignment = ['fill', 'center'];
     fileLabel.minimumSize.width = 140;
 
+    var hint = pal.add('statictext', undefined,
+      'Tip: export from Figma with "Include id" on (named layers), "Simplify stroke" on, and outline text as preferred.',
+      { multiline: true });
+    hint.alignment = ['fill', 'top'];
+    hint.minimumSize.height = 42;
+
+    // --- Split mode --------------------------------------------------------
     var splitPanel = pal.add('panel', undefined, 'Split');
     splitPanel.orientation = 'column';
     splitPanel.alignChildren = ['left', 'top'];
     splitPanel.margins = 12;
     var radioTop = splitPanel.add('radiobutton', undefined, 'One layer per top-level group (Figma layers)');
+    radioTop.helpTip = 'Mirrors the Figma layer list: one AE layer per top-level group.';
+    var radioNested = splitPanel.add('radiobutton', undefined, 'One precomp per group (nested)');
+    radioNested.helpTip = 'Preserve the Figma hierarchy: every group becomes a precomposition, ' +
+      'nested groups become nested precomps, and each shape is its own layer inside.';
     var radioLeaf = splitPanel.add('radiobutton', undefined, 'One layer per shape');
-    radioTop.value = true;
+    radioLeaf.helpTip = 'Fully exploded: every shape/text element becomes its own AE layer.';
 
+    // --- Options -----------------------------------------------------------
     var optionsPanel = pal.add('panel', undefined, 'Options');
     optionsPanel.orientation = 'column';
     optionsPanel.alignChildren = ['left', 'top'];
     optionsPanel.margins = 12;
+
     var newCompCheck = optionsPanel.add('checkbox', undefined, 'Create new composition');
-    newCompCheck.value = true;
+    newCompCheck.helpTip = 'On: build into a new comp sized to the SVG. Off: add layers to the active comp.';
+
     var gradCheck = optionsPanel.add('checkbox', undefined, 'Full gradients (writes temp .ffx preset)');
-    gradCheck.value = true;
+    gradCheck.helpTip = 'On: real multi-stop gradients via a temp preset. Off: solid first-stop color.';
 
-    var importBtn = pal.add('button', undefined, 'Create Layers');
+    var gradWarn = optionsPanel.add('statictext', undefined, '', { multiline: true });
+    gradWarn.alignment = ['fill', 'top'];
+    gradWarn.minimumSize.height = 42;
+
+    var compRow = optionsPanel.add('group');
+    compRow.orientation = 'row';
+    compRow.alignChildren = ['left', 'center'];
+    compRow.add('statictext', undefined, 'Duration (s):');
+    var durField = compRow.add('edittext', undefined, '10');
+    durField.characters = 5;
+    durField.helpTip = 'New-comp duration in seconds.';
+    compRow.add('statictext', undefined, 'FPS:');
+    var fpsField = compRow.add('edittext', undefined, '30');
+    fpsField.characters = 5;
+    fpsField.helpTip = 'New-comp frame rate.';
+
+    // --- Action buttons ----------------------------------------------------
+    var btnRow = pal.add('group');
+    btnRow.orientation = 'row';
+    btnRow.alignChildren = ['fill', 'center'];
+    var importBtn = btnRow.add('button', undefined, 'Create Layers');
+    importBtn.alignment = ['fill', 'center'];
+    importBtn.helpTip = 'Convert the selected SVG into AE layers.';
     importBtn.enabled = false;
+    var saveLogBtn = btnRow.add('button', undefined, 'Save log…');
+    saveLogBtn.helpTip = 'Save the last run summary and warnings to a text file.';
+    saveLogBtn.enabled = false;
 
-    var status = pal.add('statictext', undefined, 'Export from Figma with "Include id" on for named layers.');
+    var status = pal.add('statictext', undefined, 'Ready.');
     status.alignment = ['fill', 'top'];
 
-    var logBox = pal.add('listbox', undefined, [], { multiselect: false });
-    logBox.alignment = ['fill', 'fill'];
-    logBox.minimumSize.height = 90;
+    // Read-only multiline log: selectable and copyable (Cmd+C), unlike a listbox.
+    var logText = pal.add('edittext', undefined, '', { multiline: true, scrolling: true, readonly: true });
+    logText.alignment = ['fill', 'fill'];
+    logText.minimumSize.height = 90;
 
     function log(msg) {
-      logBox.add('item', msg);
+      logLines[logLines.length] = msg;
+      logText.text = logLines.join('\n');
+      saveLogBtn.enabled = logLines.length > 0;
     }
-
     function clearLog() {
-      logBox.removeAll();
+      logLines = [];
+      logText.text = '';
+      saveLogBtn.enabled = false;
     }
 
+    // Show/hide the gradient-preference warning based on current capability.
+    function refreshGradWarn() {
+      if (gradCheck.value && !SVGSPLIT.ae.canWriteFiles()) {
+        gradWarn.text = '! Full gradients need Preferences > Scripting & Expressions > ' +
+          '"Allow Scripts to Write Files and Access Network" enabled — otherwise gradients ' +
+          'fall back to solid colors.';
+      } else {
+        gradWarn.text = '';
+      }
+    }
+
+    // --- Restore persisted settings (before wiring handlers so programmatic
+    //     value changes don't trigger a redundant save) ---------------------
+    var savedSplit = loadPref('splitMode', 'toplevel');
+    radioLeaf.value = savedSplit === 'leaf';
+    radioNested.value = savedSplit === 'nested';
+    radioTop.value = !radioLeaf.value && !radioNested.value;
+    newCompCheck.value = loadBool('newComp', true);
+    gradCheck.value = loadPref('gradients', 'ffx') !== 'solid';
+    durField.text = loadPref('duration', '10');
+    fpsField.text = loadPref('frameRate', '30');
+    refreshGradWarn();
+
+    // --- Persist on change -------------------------------------------------
+    radioTop.onClick = radioNested.onClick = radioLeaf.onClick = function () {
+      savePref('splitMode', radioLeaf.value ? 'leaf' : radioNested.value ? 'nested' : 'toplevel');
+    };
+    newCompCheck.onClick = function () {
+      savePref('newComp', newCompCheck.value ? '1' : '0');
+    };
+    gradCheck.onClick = function () {
+      savePref('gradients', gradCheck.value ? 'ffx' : 'solid');
+      refreshGradWarn();
+    };
+    durField.onChange = function () {
+      savePref('duration', durField.text);
+    };
+    fpsField.onChange = function () {
+      savePref('frameRate', fpsField.text);
+    };
+
+    // --- Browse ------------------------------------------------------------
     browseBtn.onClick = function () {
       var f = File.openDialog('Select an SVG exported from Figma', '*.svg');
       if (f) {
@@ -3190,16 +3532,31 @@ SVGSPLIT.ui = (function () {
       }
     };
 
+    // --- Import ------------------------------------------------------------
     importBtn.onClick = function () {
       if (!selectedFile) return;
+
+      // Make the gradient fallback loud instead of silent.
+      if (gradCheck.value && !SVGSPLIT.ae.canWriteFiles()) {
+        var proceed = confirm('Full gradients need "Allow Scripts to Write Files and Access ' +
+          'Network" enabled in Preferences > Scripting & Expressions.\n\n' +
+          'Continue anyway? Gradients will use solid fallback colors.');
+        if (!proceed) {
+          status.text = 'Cancelled — enable file writing for full gradients.';
+          return;
+        }
+      }
+
       clearLog();
       status.text = 'Importing…';
       pal.update && pal.update();
       try {
         var result = SVGSPLIT.ae.importFile(selectedFile.fsName, {
-          splitMode: radioLeaf.value ? 'leaf' : 'toplevel',
+          splitMode: radioLeaf.value ? 'leaf' : radioNested.value ? 'nested' : 'toplevel',
           newComp: newCompCheck.value,
           gradients: gradCheck.value ? 'ffx' : 'solid',
+          duration: parseNumOr(durField.text, 10),
+          frameRate: parseNumOr(fpsField.text, 30),
           confirmLarge: function (count) {
             return confirm('This SVG produces ' + count + ' layers. Continue?');
           },
@@ -3210,16 +3567,59 @@ SVGSPLIT.ui = (function () {
         });
         status.text = 'Done: ' + result.layerCount + ' layer' + (result.layerCount === 1 ? '' : 's') +
           ' in "' + result.comp.name + '"' +
-          (result.warnings.length > 0 ? ' — ' + result.warnings.length + ' warning(s):' : '.');
-        for (var i = 0; i < result.warnings.length; i++) {
-          log(result.warnings[i]);
-        }
-        if (result.warnings.length === 0) log('No warnings.');
+          (result.warnings.length > 0 ? ' — ' + result.warnings.length + ' warning(s).' : '.');
+
+        log('SVG Splitter — "' + result.comp.name + '"');
+        log(result.layerCount + ' layer' + (result.layerCount === 1 ? '' : 's') + ' created.');
+        logWarnings(result.warnings);
+
         result.comp.openInViewer();
       } catch (e) {
         status.text = 'Import failed.';
         log('ERROR: ' + e.toString());
         alert('SVG Splitter\n\n' + e.toString());
+      }
+    };
+
+    // Group warnings into document-level vs layer-scoped ([name] prefix set in
+    // builder.jsx) so a long list is scannable.
+    function logWarnings(warnings) {
+      if (warnings.length === 0) {
+        log('No warnings.');
+        return;
+      }
+      var docW = [];
+      var layerW = [];
+      for (var i = 0; i < warnings.length; i++) {
+        if (warnings[i].charAt(0) === '[') layerW[layerW.length] = warnings[i];
+        else docW[docW.length] = warnings[i];
+      }
+      log('');
+      log('Warnings (' + warnings.length + '):');
+      var k;
+      if (docW.length > 0) {
+        log('-- Document --');
+        for (k = 0; k < docW.length; k++) log('  ' + docW[k]);
+      }
+      if (layerW.length > 0) {
+        log('-- Layers --');
+        for (k = 0; k < layerW.length; k++) log('  ' + layerW[k]);
+      }
+    }
+
+    // --- Save log ----------------------------------------------------------
+    saveLogBtn.onClick = function () {
+      if (logLines.length === 0) return;
+      var f = File.saveDialog('Save SVG Splitter log', 'Text:*.txt');
+      if (!f) return;
+      if (!/\.txt$/i.test(f.name)) f = new File(f.fsName + '.txt');
+      f.encoding = 'UTF-8';
+      if (f.open('w')) {
+        f.write(logLines.join('\n'));
+        f.close();
+        status.text = 'Log saved: ' + decodeURIComponent(f.name);
+      } else {
+        status.text = 'Could not write log (check file-write permission).';
       }
     };
 

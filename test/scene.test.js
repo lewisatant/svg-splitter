@@ -128,6 +128,89 @@ test('splitMode leaf: every item becomes its own layer', () => {
   assert.match(scene.layers[2].name, /c1/);
 });
 
+// ---------------------------------------------------------------- nested mode
+
+test('splitMode nested: a group becomes a group node, its shapes become layers', () => {
+  const scene = build(SPLIT_DOC, { splitMode: 'nested' });
+  assert.ok(Array.isArray(scene.tree));
+  // Root children in document order: group G, then leaf c1.
+  assert.strictEqual(scene.tree.length, 2);
+  const g = scene.tree[0];
+  assert.strictEqual(g.type, 'group');
+  assert.strictEqual(g.name, 'G');
+  assert.strictEqual(g.children.length, 2);
+  assert.strictEqual(g.children[0].type, undefined); // leaf layer spec
+  assert.match(g.children[0].name, /r1/);
+  assert.match(g.children[1].name, /r2/);
+  // The sibling circle is a leaf layer at the root, not a group.
+  assert.strictEqual(scene.tree[1].type, undefined);
+  assert.match(scene.tree[1].name, /c1/);
+  // Flat layer list still counts every leaf (used for progress/large-import).
+  assert.strictEqual(scene.layers.length, 3);
+});
+
+test('splitMode nested: nested groups produce nested group nodes', () => {
+  const scene = build(
+    svg(
+      '<g id="Outer">' +
+        '<rect id="bg" width="100" height="100" fill="#eee"/>' +
+        '<g id="Inner">' +
+        '<circle id="dot" cx="50" cy="50" r="4" fill="#000"/>' +
+        '</g>' +
+        '</g>' +
+        '<rect id="edge" x="0" y="0" width="2" height="2" fill="#111"/>'
+    ),
+    { splitMode: 'nested' }
+  );
+  const outer = scene.tree[0];
+  assert.strictEqual(outer.type, 'group');
+  assert.strictEqual(outer.name, 'Outer');
+  assert.strictEqual(outer.children.length, 2);
+  assert.match(outer.children[0].name, /bg/); // direct shape layer
+  const inner = outer.children[1];
+  assert.strictEqual(inner.type, 'group');
+  assert.strictEqual(inner.name, 'Inner');
+  assert.strictEqual(inner.children.length, 1);
+  assert.match(inner.children[0].name, /dot/);
+});
+
+test('splitMode nested: group opacity/blend attach to the group node, not the leaves', () => {
+  const scene = build(
+    svg(
+      '<g id="Faded" opacity="0.4" style="mix-blend-mode:multiply">' +
+        '<rect id="a" width="10" height="10" fill="#f00"/>' +
+        '<rect id="b" x="20" width="10" height="10" fill="#0f0"/>' +
+        '</g>' +
+        '<circle id="keep" cx="50" cy="50" r="5" fill="#00f"/>'
+    ),
+    { splitMode: 'nested' }
+  );
+  const g = scene.tree[0];
+  assertClose(g.opacity, 0.4, 1e-9, 'group opacity');
+  assert.strictEqual(g.blendMode, 'multiply');
+  // Leaves keep full opacity (the precomp layer realizes the group opacity),
+  // so no group-opacity warning is emitted.
+  assert.ok(!hasWarning(scene.warnings, /group opacity/));
+  const aFill = g.children[0].items[0].fill;
+  assertClose(aFill.opacity, 1, 1e-9, 'leaf fill opacity unscaled by group');
+});
+
+test('splitMode nested: no-op clip wrapper is inlined, not turned into a precomp', () => {
+  const scene = build(
+    '<svg width="100" height="100" viewBox="0 0 100 100">' +
+      '<g clip-path="url(#c)">' +
+      '<g id="Real"><rect id="r" width="10" height="10" fill="#f00"/></g>' +
+      '</g>' +
+      '<circle id="sib" cx="50" cy="50" r="5" fill="#00f"/>' +
+      '<defs><clipPath id="c"><rect width="100" height="100"/></clipPath></defs>' +
+      '</svg>',
+    { splitMode: 'nested' }
+  );
+  // The wrapper vanishes; #Real surfaces as a top-level group node.
+  assert.strictEqual(scene.tree[0].type, 'group');
+  assert.strictEqual(scene.tree[0].name, 'Real');
+});
+
 // ---------------------------------------------------------------- CTM baking
 
 test('nested transforms bake into vertices; stroke width and dashes scale', () => {

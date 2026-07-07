@@ -5,8 +5,17 @@
 // SVGSPLIT.scene.build(svgText, opts) -> {
 //   width, height,
 //   layers: [layerSpec],      // document order (first = bottom in AE)
+//   tree:   [node]|null,      // set only in 'nested' split mode (see below)
 //   warnings: [string]
 // }
+//
+// In 'nested' split mode the builder additionally returns `tree`: the root
+// comp's children in document order, where each Figma group (<g>) becomes a
+// groupNode and each drawable/text a layerSpec. `layers` still holds the flat
+// list of every leaf layer (used for counts/progress). The AE builder turns
+// each groupNode into a precomposition.
+//   groupNode: { type:'group', name, children:[node], effects:[effect],
+//                blendMode: string|null, opacity: number(0..1), warnings:[string] }
 //
 // layerSpec: {
 //   name, kind: 'shape'|'text',
@@ -413,7 +422,9 @@ SVGSPLIT.scene = (function () {
 
   function build(svgText, opts) {
     opts = opts || {};
-    var splitMode = opts.splitMode === 'leaf' ? 'leaf' : 'toplevel';
+    var splitMode = 'toplevel';
+    if (opts.splitMode === 'leaf') splitMode = 'leaf';
+    else if (opts.splitMode === 'nested') splitMode = 'nested';
     var globalWarnings = [];
 
     function warnGlobal(msg) {
@@ -964,6 +975,8 @@ SVGSPLIT.scene = (function () {
       name: null, depth: 0, effects: [], blend: null
     };
 
+    var tree = null;
+
     if (splitMode === 'toplevel') {
       for (var ci = 0; ci < candidates.length; ci++) {
         var cand = candidates[ci];
@@ -971,13 +984,137 @@ SVGSPLIT.scene = (function () {
         collectItems(cand, baseCtx, acc.sink);
         finishLayer(acc.layer);
       }
-    } else {
+    } else if (splitMode === 'leaf') {
       // leaf mode: every produced item/text run becomes its own layer
       for (var li = 0; li < candidates.length; li++) {
         var leafCand = candidates[li];
         var counter = { n: 0 };
         collectItemsLeafMode(leafCand, baseCtx, leafCand.attrs.id || localName(leafCand) + ' ' + (li + 1), counter);
       }
+    } else {
+      // nested mode: preserve the Figma group hierarchy as a tree. Each <g>
+      // becomes a groupNode (a precomp downstream); each drawable/text becomes
+      // its own layerSpec. Group opacity/blend/effects live on the groupNode.
+      tree = [];
+      var groupCtx = { m: baseCtx.m, style: baseCtx.style, clips: baseCtx.clips };
+      for (var gi = 0; gi < candidates.length; gi++) {
+        buildNestedNode(candidates[gi], groupCtx, tree);
+      }
+    }
+
+    // Build 0+ nodes from an element into `outChildren`, preserving order.
+    function buildNestedNode(node, gctx, outChildren) {
+      if (!isElement(node)) return;
+      var name = localName(node);
+      if (NON_RENDERED[name]) return;
+
+      if (name === 'g' || name === 'svg' || name === 'a') {
+        // A no-op clip wrapper contributes nothing; inline its children so it
+        // doesn't produce a redundant precomp.
+        if (name === 'g' && isNoopClipWrapper(node)) {
+          for (var k = 0; k < node.children.length; k++) {
+            buildNestedNode(node.children[k], gctx, outChildren);
+          }
+          return;
+        }
+        var g = makeGroupNode(node, gctx, name);
+        if (g) outChildren[outChildren.length] = g;
+        return;
+      }
+
+      // Leaf element: reuse collectItems (handles use/image/text/drawables plus
+      // the element's own transform/clip/filter/opacity) and emit one layer per
+      // produced item/run, in place.
+      collectLeafLayers(node, gctx, outChildren);
+    }
+
+    function makeGroupNode(node, gctx, name) {
+      var computed = styleMod.compute(node, gctx.style, sheet);
+      if (computed.display === 'none') return null;
+
+      var m = matrix.multiply(gctx.m, matrix.parse(node.attrs.transform));
+
+      var clips = gctx.clips;
+      var clipRef = urlRefId(node.attrs['clip-path'] || styleMod.parseInline(node.attrs.style)['clip-path']);
+      if (clipRef !== null) {
+        var clipContours = resolveClip(clipRef, m, warnGlobal);
+        if (clipContours && !clipIsViewBoxNoop(clipContours)) clips = clips.concat([clipContours]);
+      }
+
+      if (node.attrs.mask !== undefined || styleMod.parseInline(node.attrs.style).mask) {
+        warnGlobal('mask on group <' + name + (node.attrs.id ? ' id="' + node.attrs.id + '"' : '') +
+          '> not supported; content imported unmasked');
+      }
+      if (name === 'svg' && node !== root) {
+        warnGlobal('nested <svg> treated as group/precomp (inner viewBox ignored)');
+      }
+
+      var ownEffects = [];
+      var filterRef = urlRefId(node.attrs.filter || styleMod.parseInline(node.attrs.style).filter);
+      if (filterRef !== null) {
+        var filterNode = defs[filterRef];
+        if (filterNode && localName(filterNode) === 'filter') {
+          var decoded = decodeFilter(filterNode);
+          for (var dw = 0; dw < decoded.warnings.length; dw++) warnGlobal(decoded.warnings[dw]);
+          ownEffects = decoded.effects;
+        } else {
+          warnGlobal('filter #' + filterRef + ' not found; ignored');
+        }
+      }
+
+      var blend = computed['mix-blend-mode'];
+      var groupNode = {
+        type: 'group',
+        name: node.attrs.id || name || 'Group',
+        children: [],
+        effects: ownEffects,
+        blendMode: blend && blend !== 'normal' ? blend : null,
+        opacity: clampOpacity(computed.opacity),
+        warnings: []
+      };
+
+      // Children inherit geometry/clips but NOT opacity/blend/effects: those are
+      // realized on the precomp layer, so the leaves must not re-apply them.
+      var childCtx = { m: m, style: computed, clips: clips };
+      for (var i = 0; i < node.children.length; i++) {
+        buildNestedNode(node.children[i], childCtx, groupNode.children);
+      }
+      if (groupNode.children.length === 0) return null;
+      return groupNode;
+    }
+
+    // A leaf's own opacity/blend/effects still belong to it, so seed a fresh
+    // per-leaf context (opacity 1, no inherited effects/blend) and let
+    // collectItems read the element's own presentation attributes.
+    function collectLeafLayers(node, gctx, outChildren) {
+      var leafCtx = {
+        m: gctx.m, style: gctx.style, opacity: 1, clips: gctx.clips,
+        name: null, depth: 0, effects: [], blend: null
+      };
+      var sink = {
+        item: function (item, itemCtx) {
+          var acc = newLayerAccumulator(item.name);
+          acc.layer.effects = itemCtx && itemCtx.effects ? itemCtx.effects.slice() : [];
+          acc.layer.blendMode = itemCtx ? itemCtx.blend : null;
+          acc.sink.item(item);
+          finishLayer(acc.layer, outChildren);
+        },
+        text: function (run) {
+          var acc = newLayerAccumulator(textLayerName(run.text));
+          acc.sink.text(run);
+          finishLayer(acc.layer, outChildren);
+        },
+        effect: function () {},
+        blend: function () {},
+        warn: function (msg) { warnGlobal(msg); }
+      };
+      collectItems(node, leafCtx, sink);
+    }
+
+    function textLayerName(text) {
+      var t = String(text || '').replace(/\s+/g, ' ').replace(/^ | $/g, '');
+      if (t.length === 0) return 'Text';
+      return t.length > 32 ? t.substring(0, 32) : t;
     }
 
     function collectItemsLeafMode(node, ctx, baseName, counter) {
@@ -1006,7 +1143,10 @@ SVGSPLIT.scene = (function () {
       collectItems(node, ctx, sink);
     }
 
-    function finishLayer(layer) {
+    // Registers a finished layer in the flat `layers` list (used for counts and
+    // for the flat split modes). When `target` is given (nested mode), the layer
+    // is ALSO appended there so it keeps its place in the group's child order.
+    function finishLayer(layer, target) {
       var hasContent = layer.items.length > 0 || layer.textRuns.length > 0;
       if (!hasContent) {
         for (var i = 0; i < layer.warnings.length; i++) warnGlobal(layer.warnings[i]);
@@ -1019,12 +1159,14 @@ SVGSPLIT.scene = (function () {
         layer.bbox = { minX: 0, minY: 0, maxX: width, maxY: height };
       }
       layers[layers.length] = layer;
+      if (target) target[target.length] = layer;
     }
 
     return {
       width: Math.ceil(width),
       height: Math.ceil(height),
       layers: layers,
+      tree: tree,
       warnings: globalWarnings
     };
   }

@@ -388,6 +388,90 @@ SVGSPLIT.ae = (function () {
     }
   }
 
+  // Builds one shape/text layer from a leaf layer spec and applies its own
+  // blend mode, effects, and per-layer warnings. Returns the created layer.
+  function buildOneLayer(comp, spec, opts, warn) {
+    var layer = null;
+    // A spec can carry both shape items and text runs (e.g. a Figma frame with
+    // a background shape and live text) - build both.
+    if (spec.items.length > 0) {
+      layer = buildShapeLayer(comp, spec, opts, warn);
+    }
+    if (spec.textRuns.length > 0) {
+      var textLayers = buildTextLayers(comp, spec, warn);
+      if (!layer) layer = textLayers.length > 0 ? textLayers[0] : null;
+    }
+    if (layer) {
+      if (spec.blendMode) {
+        var be = blendEnum(spec.blendMode);
+        if (be !== null) layer.blendingMode = be;
+        else warn('blend mode "' + spec.blendMode + '" not mapped; left normal');
+      }
+      addEffects(layer, spec, warn);
+    }
+    for (var wi = 0; wi < spec.warnings.length; wi++) {
+      warn('[' + spec.name + '] ' + spec.warnings[wi]);
+    }
+    return layer;
+  }
+
+  // Keeps precomp names unique in the project panel so repeated Figma group
+  // names ("Group", "Icon") don't all collapse to one confusing entry.
+  function uniqueName(base, counts) {
+    base = base || 'Group';
+    if (!counts.hasOwnProperty(base)) {
+      counts[base] = 1;
+      return base;
+    }
+    counts[base]++;
+    return base + ' ' + counts[base];
+  }
+
+  // Builds a nested-mode child list into `comp`, in document order. AE adds
+  // each new layer at the TOP of the stack, so iterating first->last leaves the
+  // last (front-most in SVG paint order) on top - matching the source.
+  function buildChildren(comp, children, scene, opts, warn, progress, total, counts) {
+    for (var i = 0; i < children.length; i++) {
+      var child = children[i];
+      if (child.type === 'group') {
+        buildGroupComp(comp, child, scene, opts, warn, progress, total, counts);
+      } else {
+        progress.n++;
+        if (opts.onProgress) opts.onProgress(progress.n, total, child.name);
+        buildOneLayer(comp, child, opts, warn);
+      }
+    }
+  }
+
+  // Turns a Figma group node into a precomposition (same size as the root comp,
+  // so world-space geometry lands pixel-exact when the precomp layer is centered
+  // in its parent) and adds it as a layer carrying the group's blend/opacity/fx.
+  function buildGroupComp(parentComp, groupNode, scene, opts, warn, progress, total, counts) {
+    var pre = app.project.items.addComp(
+      uniqueName(groupNode.name, counts),
+      Math.max(scene.width, 4),
+      Math.max(scene.height, 4),
+      1.0,
+      opts.duration || 10,
+      opts.frameRate || 30
+    );
+    buildChildren(pre, groupNode.children, scene, opts, warn, progress, total, counts);
+
+    var layer = parentComp.layers.add(pre);
+    if (groupNode.blendMode) {
+      var be = blendEnum(groupNode.blendMode);
+      if (be !== null) layer.blendingMode = be;
+      else warn('blend mode "' + groupNode.blendMode + '" on group "' + groupNode.name + '" not mapped; left normal');
+    }
+    if (groupNode.opacity !== undefined && groupNode.opacity < 1) {
+      layer.property('ADBE Transform Group').property('ADBE Opacity').setValue(groupNode.opacity * 100);
+    }
+    if (groupNode.effects && groupNode.effects.length > 0) {
+      addEffects(layer, { effects: groupNode.effects }, warn);
+    }
+    return layer;
+  }
+
   // scene: result of SVGSPLIT.scene.build
   // opts: { newComp: bool, compName: str, duration: sec, frameRate: fps,
   //         gradients: 'ffx'|'solid', onProgress: fn(i,total,name)|null }
@@ -425,29 +509,14 @@ SVGSPLIT.ae = (function () {
         );
       }
 
-      for (var i = 0; i < scene.layers.length; i++) {
-        var spec = scene.layers[i];
-        if (opts.onProgress) opts.onProgress(i + 1, totalLayers, spec.name);
-        var layer = null;
-        // A spec can carry both shape items and text runs (e.g. a Figma frame
-        // with a background shape and live text) - build both.
-        if (spec.items.length > 0) {
-          layer = buildShapeLayer(comp, spec, opts, warn);
-        }
-        if (spec.textRuns.length > 0) {
-          var textLayers = buildTextLayers(comp, spec, warn);
-          if (!layer) layer = textLayers.length > 0 ? textLayers[0] : null;
-        }
-        if (layer) {
-          if (spec.blendMode) {
-            var be = blendEnum(spec.blendMode);
-            if (be !== null) layer.blendingMode = be;
-            else warn('blend mode "' + spec.blendMode + '" not mapped; left normal');
-          }
-          addEffects(layer, spec, warn);
-        }
-        for (var wi = 0; wi < spec.warnings.length; wi++) {
-          warnings[warnings.length] = '[' + spec.name + '] ' + spec.warnings[wi];
+      if (scene.tree) {
+        // nested mode: build the group hierarchy as precomps into the root comp
+        buildChildren(comp, scene.tree, scene, opts, warn, { n: 0 }, totalLayers, {});
+      } else {
+        for (var i = 0; i < scene.layers.length; i++) {
+          var spec = scene.layers[i];
+          if (opts.onProgress) opts.onProgress(i + 1, totalLayers, spec.name);
+          buildOneLayer(comp, spec, opts, warn);
         }
       }
     } finally {
@@ -458,6 +527,27 @@ SVGSPLIT.ae = (function () {
       warnings[warnings.length] = scene.warnings[gw];
     }
     return { comp: comp, layerCount: totalLayers, warnings: warnings };
+  }
+
+  // Capability probe: can scripts write files? "Full gradients" writes a temp
+  // .ffx preset (src/ae/gradients.jsx), which AE gates behind Preferences >
+  // Scripting & Expressions > "Allow Scripts to Write Files and Access Network".
+  // A real temp write is version-proof and predicts the exact operation the
+  // gradient path needs, unlike reading a pref key that can change across AE
+  // versions. Returns true if a tiny temp file can be written (and removed).
+  function canWriteFiles() {
+    try {
+      var f = new File(Folder.temp.fsName + '/svg-splitter-probe.tmp');
+      f.encoding = 'UTF-8';
+      if (!f.open('w')) return false;
+      f.write('ok');
+      f.close();
+      var ok = f.exists;
+      try { f.remove(); } catch (eRm) {}
+      return ok;
+    } catch (e) {
+      return false;
+    }
   }
 
   // Reads an SVG from disk and imports it. Entry point shared by the panel
@@ -477,5 +567,5 @@ SVGSPLIT.ae = (function () {
     return buildComp(scene, opts);
   }
 
-  return { buildComp: buildComp, importFile: importFile };
+  return { buildComp: buildComp, importFile: importFile, canWriteFiles: canWriteFiles };
 })();
