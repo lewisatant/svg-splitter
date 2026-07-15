@@ -1,0 +1,36 @@
+name: Daily Report
+
+# Automation mode: cron fires the job, Claude writes the digest and posts it as
+# a GitHub issue. workflow_dispatch lets you also run it by hand from the Actions
+# tab (great for a live demo).
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Produce the daily digest for this repo and POST it as a GitHub issue.
+            Steps:
+            1. Use `git log --since=yesterday` to gather the last 24h of commits.
+            2. Use `gh issue list` to gather currently open issues.
+            3. Write a short bulleted digest: a "Commits" section (one line each:
+               short SHA + subject) and an "Open issues" section (number + title).
+               If there were no commits, say so in one line.
+            4. Post it with `gh issue create` — title "Daily report — <UTC date>",
+               label "daily-report", body = the digest. Reuse the existing
+               "daily-report" label if present; create it if it is missing.
+            Keep it concise; this is a roll-up, not prose.
+          claude_args: "--max-turns 6 --permission-mode dontAsk --allowedTools 'Read,Glob,Grep,Bash(git log:*),Bash(date:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh label list:*),Bash(gh label create:*)'"
