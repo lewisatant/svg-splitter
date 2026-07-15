@@ -1,0 +1,24 @@
+name: Daily Report
+
+# Automation mode: cron fires the job, Claude posts the result. workflow_dispatch
+# lets you also run it by hand from the Actions tab (great for a live demo).
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: "Summarize yesterday's commits and any open issues in this repo. Keep it to a short bulleted digest."
+          claude_args: "--max-turns 5 --permission-mode dontAsk --allowedTools 'Read,Glob,Grep,Bash(git log:*),Bash(gh issue list:*)'"
