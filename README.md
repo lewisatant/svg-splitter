@@ -53,7 +53,9 @@ slide — match at **0.00% difference**.
      inside each layer. *(default)*
    - **One precomp per group** — preserves your Figma hierarchy: every group becomes a
      precomposition, nested groups become nested precomps, and each shape is its own layer
-     inside. Group opacity, blend mode, and effects land on the precomp layer.
+     inside. Group opacity, blend mode, and effects land on the precomp layer. **Frames**
+     (groups that clip their content) become precomps sized to the frame, positioned in the
+     parent, and clipping any overflow — just like in Figma.
    - **One layer per shape** — fully exploded; every path becomes its own layer, named by its
      place in the hierarchy.
 3. **Create Layers.** A comp sized to the SVG is created (or layers land in your active comp),

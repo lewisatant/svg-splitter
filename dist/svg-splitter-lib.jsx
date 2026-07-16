@@ -1322,7 +1322,12 @@ SVGSPLIT.style = (function () {
 // list of every leaf layer (used for counts/progress). The AE builder turns
 // each groupNode into a precomposition.
 //   groupNode: { type:'group', name, children:[node], effects:[effect],
-//                blendMode: string|null, opacity: number(0..1), warnings:[string] }
+//                blendMode: string|null, opacity: number(0..1),
+//                frame: {minX,minY,width,height}|null, warnings:[string] }
+//   A groupNode with `frame` set is a Figma frame: the precomp is sized to the
+//   frame rect and clips its content; its children's geometry is in frame-local
+//   space (world minus frame top-left). Plain groups (frame:null) are
+//   full-canvas precomps in world coordinates.
 //
 // layerSpec: {
 //   name, kind: 'shape'|'text',
@@ -2342,10 +2347,27 @@ SVGSPLIT.scene = (function () {
       var m = matrix.multiply(gctx.m, matrix.parse(node.attrs.transform));
 
       var clips = gctx.clips;
+      var frame = null;
       var clipRef = urlRefId(node.attrs['clip-path'] || styleMod.parseInline(node.attrs.style)['clip-path']);
       if (clipRef !== null) {
         var clipContours = resolveClip(clipRef, m, warnGlobal);
-        if (clipContours && !clipIsViewBoxNoop(clipContours)) clips = clips.concat([clipContours]);
+        if (clipContours && !clipIsViewBoxNoop(clipContours)) {
+          // A Figma frame clips its content to a rectangle. When the clip is a
+          // plain axis-aligned rect we treat the group as a FRAME: the precomp
+          // is sized to that rect and clips content to its own bounds (so we
+          // don't bake the clip onto every child). A non-rect clip stays a
+          // regular per-child clip on a full-canvas group precomp.
+          var frameRect = rectOf(clipContours);
+          if (frameRect) {
+            frame = {
+              minX: frameRect.minX, minY: frameRect.minY,
+              width: frameRect.maxX - frameRect.minX,
+              height: frameRect.maxY - frameRect.minY
+            };
+          } else {
+            clips = clips.concat([clipContours]);
+          }
+        }
       }
 
       if (node.attrs.mask !== undefined || styleMod.parseInline(node.attrs.style).mask) {
@@ -2377,12 +2399,31 @@ SVGSPLIT.scene = (function () {
         effects: ownEffects,
         blendMode: blend && blend !== 'normal' ? blend : null,
         opacity: clampOpacity(computed.opacity),
+        frame: frame,
         warnings: []
       };
 
+      // A frame precomp is sized to its rect, so its content lives in
+      // frame-local space (world minus the frame's top-left). Fold that shift
+      // into the child matrix and move any inherited (world-space) clips with
+      // it. Plain groups keep world coordinates.
+      var childM = m;
+      var childClips = clips;
+      if (frame) {
+        var shift = matrix.translate(-frame.minX, -frame.minY);
+        childM = matrix.multiply(shift, m);
+        if (childClips.length > 0) {
+          var moved = [];
+          for (var mc = 0; mc < childClips.length; mc++) {
+            moved[moved.length] = transformContours(childClips[mc], shift);
+          }
+          childClips = moved;
+        }
+      }
+
       // Children inherit geometry/clips but NOT opacity/blend/effects: those are
       // realized on the precomp layer, so the leaves must not re-apply them.
-      var childCtx = { m: m, style: computed, clips: clips };
+      var childCtx = { m: childM, style: computed, clips: childClips };
       for (var i = 0; i < node.children.length; i++) {
         buildNestedNode(node.children[i], childCtx, groupNode.children);
       }
@@ -3220,14 +3261,25 @@ SVGSPLIT.ae = (function () {
     }
   }
 
-  // Turns a Figma group node into a precomposition (same size as the root comp,
-  // so world-space geometry lands pixel-exact when the precomp layer is centered
-  // in its parent) and adds it as a layer carrying the group's blend/opacity/fx.
+  // Turns a group node into a precomposition and adds it as a layer carrying the
+  // group's blend/opacity/effects. A plain group is a full-canvas precomp in
+  // world coordinates; a frame (groupNode.frame set) is sized to the frame rect
+  // and clips its content to its own bounds. Either way the precomp is placed so
+  // its content lands pixel-exact: anchor at the precomp centre, position =
+  // centre + this comp's own world shift. scene.js's coordinate fold already
+  // re-bases a groupNode's children (and any nested frame's minX/minY) to this
+  // precomp's own (0,0), so children need no further shift.
   function buildGroupComp(parentComp, groupNode, scene, opts, warn, progress, total, counts) {
+    var fr = groupNode.frame;
+    var w = fr ? Math.max(4, Math.round(fr.width)) : Math.max(scene.width, 4);
+    var h = fr ? Math.max(4, Math.round(fr.height)) : Math.max(scene.height, 4);
+    var shiftX = fr ? fr.minX : 0;
+    var shiftY = fr ? fr.minY : 0;
+
     var pre = app.project.items.addComp(
       uniqueName(groupNode.name, counts),
-      Math.max(scene.width, 4),
-      Math.max(scene.height, 4),
+      w,
+      h,
       1.0,
       opts.duration || 10,
       opts.frameRate || 30
@@ -3235,6 +3287,9 @@ SVGSPLIT.ae = (function () {
     buildChildren(pre, groupNode.children, scene, opts, warn, progress, total, counts);
 
     var layer = parentComp.layers.add(pre);
+    var xform = layer.property('ADBE Transform Group');
+    xform.property('ADBE Anchor Point').setValue([w / 2, h / 2]);
+    xform.property('ADBE Position').setValue([w / 2 + shiftX, h / 2 + shiftY]);
     if (groupNode.blendMode) {
       var be = blendEnum(groupNode.blendMode);
       if (be !== null) layer.blendingMode = be;

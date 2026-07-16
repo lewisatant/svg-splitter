@@ -443,14 +443,25 @@ SVGSPLIT.ae = (function () {
     }
   }
 
-  // Turns a Figma group node into a precomposition (same size as the root comp,
-  // so world-space geometry lands pixel-exact when the precomp layer is centered
-  // in its parent) and adds it as a layer carrying the group's blend/opacity/fx.
+  // Turns a group node into a precomposition and adds it as a layer carrying the
+  // group's blend/opacity/effects. A plain group is a full-canvas precomp in
+  // world coordinates; a frame (groupNode.frame set) is sized to the frame rect
+  // and clips its content to its own bounds. Either way the precomp is placed so
+  // its content lands pixel-exact: anchor at the precomp centre, position =
+  // centre + this comp's own world shift. scene.js's coordinate fold already
+  // re-bases a groupNode's children (and any nested frame's minX/minY) to this
+  // precomp's own (0,0), so children need no further shift.
   function buildGroupComp(parentComp, groupNode, scene, opts, warn, progress, total, counts) {
+    var fr = groupNode.frame;
+    var w = fr ? Math.max(4, Math.round(fr.width)) : Math.max(scene.width, 4);
+    var h = fr ? Math.max(4, Math.round(fr.height)) : Math.max(scene.height, 4);
+    var shiftX = fr ? fr.minX : 0;
+    var shiftY = fr ? fr.minY : 0;
+
     var pre = app.project.items.addComp(
       uniqueName(groupNode.name, counts),
-      Math.max(scene.width, 4),
-      Math.max(scene.height, 4),
+      w,
+      h,
       1.0,
       opts.duration || 10,
       opts.frameRate || 30
@@ -458,6 +469,9 @@ SVGSPLIT.ae = (function () {
     buildChildren(pre, groupNode.children, scene, opts, warn, progress, total, counts);
 
     var layer = parentComp.layers.add(pre);
+    var xform = layer.property('ADBE Transform Group');
+    xform.property('ADBE Anchor Point').setValue([w / 2, h / 2]);
+    xform.property('ADBE Position').setValue([w / 2 + shiftX, h / 2 + shiftY]);
     if (groupNode.blendMode) {
       var be = blendEnum(groupNode.blendMode);
       if (be !== null) layer.blendingMode = be;
